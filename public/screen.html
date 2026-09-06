@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>丰浩大屏机 - 个人安全教育学习</title>
+    <link rel="stylesheet" href="./screen.css?v=18" />
+  </head>
+  <body>
+    <main id="screenApp" class="term">
+      <div class="term-inner">
+        <header class="term-top">
+          <div class="brand">
+            <span class="brand-mark">FH</span>
+            <div>
+              <p class="brand-name">丰浩安全教育终端</p>
+              <p class="brand-en">FENGHAO SAFETY TERMINAL</p>
+            </div>
+          </div>
+          <div class="top-right">
+            <span class="status-pill" :class="'st-' + (session.status || 'boot')">
+              <i class="dot"></i>{{ sessionStatusLabel }}
+            </span>
+            <span class="device-tag"><small>学习终端</small>{{ device.deviceName || deviceId }}</span>
+            <button class="btn-ghost" type="button" @click="openAssistant">安全问答</button>
+            <button class="btn-ghost admin-entry" type="button" @click="openAdminVideoCenter" :aria-expanded="adminVideoOpen">
+              {{ adminSession ? '视频查看' : '项目管理员登录' }}
+            </button>
+            <button v-if="adminSession" class="btn-ghost" type="button" @click="logoutProjectAdmin">退出管理员</button>
+            <button class="btn-ghost" type="button" @click="resetSession" :disabled="busy">重新生成二维码</button>
+          </div>
+        </header>
+
+        <section class="workspace-heading">
+          <span class="title-bar" aria-hidden="true"></span>
+          <div>
+            <h1 class="term-title">{{ title }}</h1>
+            <p>{{ subtitle }}</p>
+          </div>
+        </section>
+
+        <transition name="fade">
+          <div v-if="error" class="banner banner-error">{{ error }}</div>
+        </transition>
+        <div class="term-stage">
+          <!-- 初始化 -->
+          <section v-if="stage === 'boot'" class="stage-center">
+            <div class="spinner"></div>
+            <h2>正在初始化大屏机</h2>
+            <p class="muted">获取设备配置与学习会话…</p>
+          </section>
+
+          <!-- 等待扫码 -->
+          <section v-else-if="stage === 'waiting'" class="stage-scan stage-card">
+            <div class="scan-qr-panel">
+              <div class="panel-eyebrow">
+                <span>个人学习</span>
+                <strong>等待扫码</strong>
+              </div>
+              <div class="qr-frame">
+                <span class="scan-line"></span>
+                <img v-if="session.qrUrl" :src="session.qrUrl" alt="个人学习二维码" />
+                <div v-else class="qr-skeleton">二维码生成中</div>
+              </div>
+              <p class="qr-caption">请使用丰浩工人端扫描二维码</p>
+            </div>
+            <div class="scan-copy">
+              <p class="section-hint">安全教育学习</p>
+              <h2>扫码后开始个人学习</h2>
+              <p class="muted lg">系统将自动识别学习人员，并加载其待学习的安全教育内容。</p>
+              <ol class="scan-guide" aria-label="学习流程">
+                <li><span>扫码</span><p>使用工人端扫描左侧二维码</p></li>
+                <li><span>确认</span><p>大屏显示人员信息后确认签到</p></li>
+                <li><span>学习</span><p>按要求完成视频课程学习</p></li>
+              </ol>
+              <div class="scan-note"><strong>二维码有效期</strong><span>{{ displayExpireAt }}</span></div>
+            </div>
+          </section>
+
+          <!-- 已识别工人 -->
+          <section v-else-if="stage === 'identified'" class="stage-worker">
+            <div class="avatar">{{ workerInitial }}</div>
+            <div class="worker-info">
+              <p class="section-hint success">身份已识别</p>
+              <h2>{{ session.worker?.name || '已识别工人' }}</h2>
+              <p class="worker-meta"><span>{{ session.worker?.projectName || '未设置项目' }}</span><span>{{ session.worker?.teamName || '未设置班组' }}</span><span>{{ session.worker?.tradeName || '未设置工种' }}</span></p>
+              <button class="btn-primary lg" type="button" @click="startLearning" :disabled="busy">确认签到并开始学习</button>
+            </div>
+          </section>
+
+          <!-- 播放学习 -->
+          <section v-else-if="stage === 'playing'" class="stage-play">
+            <aside class="playlist">
+              <div class="playlist-heading">
+                <div><p>学习内容</p><strong>{{ videos.length }} 个课程片段</strong></div>
+                <span>{{ overallProgress }}%</span>
+              </div>
+              <button v-for="(video,index) in videos" :key="video.videoId" class="pl-item" :class="{active:index===currentIndex, done:video.progress>=100}" type="button" @click="currentIndex=index">
+                <span class="pl-idx">{{ index + 1 }}</span>
+                <span class="pl-body">
+                  <strong>{{ video.title }}</strong>
+                  <span class="pl-bar"><i :style="{width:(video.progress||0)+'%'}"></i></span>
+                </span>
+                <small>{{ video.progress || 0 }}%</small>
+              </button>
+            </aside>
+            <section class="player">
+              <p class="section-hint">正在播放</p>
+              <h2 class="player-title">{{ currentVideo?.title || '暂无视频' }}</h2>
+              <div class="player-screen">
+                <video v-if="currentVideo?.videoUrl" :src="currentVideo.videoUrl" controls autoplay @ended="finishCurrentVideo"></video>
+                <div v-else class="player-mock">
+                  <span class="mock-icon">▶</span>
+                  <strong>数字人安全教育视频</strong>
+                  <p class="muted">当前课程未配置视频地址，可点击下方按钮模拟播放完成。</p>
+                </div>
+              </div>
+              <div class="player-actions">
+                <button class="btn-ghost" type="button" @click="reportProgress(50)" :disabled="busy || !currentVideo">上报 50%</button>
+                <button class="btn-primary" type="button" @click="finishCurrentVideo" :disabled="busy || !currentVideo">本段学习完成</button>
+                <button class="btn-ghost" type="button" @click="nextVideo" :disabled="busy || currentIndex >= videos.length - 1">下一段</button>
+              </div>
+            </section>
+          </section>
+
+          <!-- 完成 -->
+          <section v-else-if="stage === 'completed'" class="stage-center success">
+            <div class="done-ring"><span>完成</span></div>
+            <h2>视频学习已完成</h2>
+            <p class="muted lg">请在手机端进入考试答题。设备将在清空后回到扫码等待页。</p>
+            <button class="btn-primary lg" type="button" @click="clearAndRestart" :disabled="busy">清空并返回扫码页</button>
+          </section>
+        </div>
+      </div>
+
+      <transition name="assistant-panel">
+        <section v-if="assistantOpen" class="assistant-overlay" aria-label="安全知识问答" @click.self="closeAssistant" @keydown.esc="closeAssistant" tabindex="-1">
+          <article class="assistant-panel" role="dialog" aria-modal="true" aria-labelledby="assistantTitle">
+            <header class="assistant-header">
+              <div class="assistant-heading">
+                <span class="assistant-avatar">智</span>
+                <div>
+                  <p class="assistant-label">施工与工程安全</p>
+                  <h2 id="assistantTitle">丰浩安全培训助手</h2>
+                  <p class="assistant-status" :class="'assistant-state-' + assistantConnectionMode"><i></i>{{ assistantConnection }}</p>
+                </div>
+              </div>
+              <div class="assistant-actions">
+                <button class="btn-ghost assistant-nav-entry" type="button" @click="closeAssistant">扫码学习</button>
+                <button class="btn-ghost assistant-nav-entry" type="button" @click="openAdminVideoCenter">视频播放</button>
+                <button class="btn-ghost" type="button" @click="toggleAssistantView">{{ assistantViewMode === 'voice' ? '查看对话记录' : '返回语音模式' }}</button>
+                <button v-if="assistantViewMode === 'chat'" class="btn-ghost" type="button" @click="resetAssistant" :disabled="assistantBusy">新建对话</button>
+              </div>
+            </header>
+
+            <section v-if="assistantViewMode === 'voice'" class="assistant-voice-home" :data-state="voicePresentationState" aria-live="polite">
+              <section class="assistant-signal-stage">
+                <div class="assistant-signal-surface" aria-hidden="true">
+                  <span class="assistant-mascot-wave wave-left"><i></i><i></i><i></i></span>
+                  <div class="assistant-mascot-figure">
+                    <img class="assistant-mascot-pose assistant-mascot-pose-speaking" src="./assets/safety-assistant-woman-speaking-hd.png" width="1644" height="1800" alt="" decoding="async" />
+                    <img class="assistant-mascot-pose assistant-mascot-pose-thinking" src="./assets/safety-assistant-woman-thinking-hd.png" width="1644" height="1800" alt="" decoding="async" />
+                    <video ref="assistantSpeakingVideo" class="assistant-mascot-video" muted loop playsinline preload="metadata" poster="./assets/safety-assistant-woman-speaking-hd.png">
+                      <source src="./assets/safety-assistant-woman-speaking-loop.webm" type="video/webm" />
+                    </video>
+                  </div>
+                  <span class="assistant-mascot-wave wave-right"><i></i><i></i><i></i></span>
+                </div>
+                <div class="assistant-signal-copy">
+                  <p class="assistant-voice-state-title">{{ voiceStateTitle }}</p>
+                </div>
+                <section v-if="voicePresentationState !== 'ready'" class="assistant-voice-transcript" aria-label="当前语音内容">
+                  <strong>{{ voiceTranscript }}</strong>
+                </section>
+                <div class="assistant-voice-actions">
+                  <button class="assistant-listen-action" type="button" :disabled="!assistantSpeechEnabled || assistantVoiceStarting" @click="toggleAssistantVoice">{{ assistantVoiceStarting ? '正在开启' : (assistantVoiceListening ? '结束聆听' : '开始聆听') }}</button>
+                </div>
+                <p v-if="!assistantSpeechEnabled" class="assistant-voice-unavailable">{{ assistantVoiceHint }}</p>
+              </section>
+
+              <aside class="assistant-answer-rail" aria-live="polite">
+                <div class="assistant-answer-rail-head">
+                  <p>实时回答</p>
+                  <span v-if="assistantBusy">正在生成</span>
+                </div>
+                <div ref="assistantAnswerStream" class="assistant-answer-stream">
+                  <strong v-if="voiceLatestAnswer" v-html="formatAssistantMessage(voiceLatestAnswer)"></strong>
+                  <p v-else-if="assistantBusy" class="assistant-answer-pending"><i></i>{{ voiceLiveStatus }}</p>
+                  <strong v-else>开始聆听后，回答会在这里实时显示。</strong>
+                </div>
+                <button class="assistant-history-link" type="button" @click="toggleAssistantView">打开对话记录</button>
+              </aside>
+            </section>
+
+            <section v-else class="assistant-chat-view">
+              <div class="assistant-chat" ref="assistantChat" aria-live="polite">
+                <article v-for="(item, index) in assistantMessages" :key="index" class="assistant-message" :class="item.role">
+                  <span class="assistant-message-avatar">{{ item.role === 'assistant' ? '智' : '工' }}</span>
+                  <div class="assistant-message-content">
+                    <p class="assistant-message-meta">{{ item.role === 'assistant' ? '丰浩安全培训助手' : '现场学习人员' }}</p>
+                    <div v-if="item.processing && !item.content" class="assistant-processing"><i></i>{{ item.processing }}</div>
+                    <div v-else class="assistant-bubble" v-html="formatAssistantMessage(item.content)"></div>
+                    <details v-if="item.references && item.references.length" class="assistant-references">
+                      <summary>参考资料（{{ item.references.length }} 条）</summary>
+                      <a v-for="(reference, referenceIndex) in item.references" :key="reference.id || reference.url || referenceIndex" :href="safeAssistantUrl(reference.url)" :target="safeAssistantUrl(reference.url) ? '_blank' : null" rel="noopener noreferrer">
+                        <b>{{ referenceIndex + 1 }}</b><span><strong>{{ reference.title || '参考资料' }}</strong><small>{{ reference.siteName || reference.site_name || '联网问答 Agent' }}</small></span>
+                      </a>
+                    </details>
+                    <div v-if="item.followUps && item.followUps.length" class="assistant-followups">
+                      <button v-for="followUp in item.followUps.slice(0, 3)" :key="followUp" type="button" @click="askFollowUp(followUp)" :disabled="assistantBusy">{{ followUp }}</button>
+                    </div>
+                  </div>
+                </article>
+              </div>
+              <footer class="assistant-composer-area">
+                <div v-if="assistantSpeechEnabled && assistantVoiceState !== 'idle'" class="assistant-voice-bar" :data-state="assistantVoiceState">
+                  <span class="assistant-voice-wave" aria-hidden="true"><i></i><i></i><i></i><i></i></span>
+                  <p>{{ assistantVoiceStatus }}</p>
+                  <button v-if="assistantVoiceState === 'playing' || assistantVoiceState === 'thinking'" class="btn-ghost" type="button" @click="cancelAssistantSpeech">停止播报</button>
+                  <button v-if="assistantVoiceListening" class="btn-ghost" type="button" @click="stopAssistantVoice">结束语音</button>
+                </div>
+                <div class="assistant-suggestions">
+                  <button v-for="suggestion in assistantSuggestions" :key="suggestion" type="button" @click="askFollowUp(suggestion)" :disabled="assistantBusy">{{ suggestion }}</button>
+                </div>
+                <form class="assistant-composer" @submit.prevent="sendAssistantQuestion">
+                  <label class="sr-only" for="assistantQuestion">输入安全问题</label>
+                  <button class="assistant-mic" :class="{ active: assistantVoiceListening }" type="button" :disabled="!assistantSpeechEnabled || assistantVoiceStarting" :aria-pressed="assistantVoiceListening" :aria-label="assistantVoiceStarting ? '正在开启语音提问' : (assistantVoiceListening ? '结束语音提问' : '开始语音提问')" @click="toggleAssistantVoice">语音</button>
+                  <textarea id="assistantQuestion" ref="assistantInput" v-model="assistantInput" rows="1" maxlength="2000" :disabled="assistantBusy" placeholder="请输入施工或工程安全相关问题，Enter 发送" @keydown.enter.exact.prevent="sendAssistantQuestion"></textarea>
+                  <button class="btn-primary" type="submit" :disabled="assistantBusy || !assistantInput.trim()">{{ assistantBusy ? '回答中' : '发送' }}</button>
+                </form>
+                <div class="assistant-voice-options">
+                  <label><input v-model="assistantSpeakReplies" type="checkbox" :disabled="!assistantSpeechEnabled" /> 语音播报回答</label>
+                  <label class="assistant-rate"><span>播报语速</span><select v-model.number="assistantSpeechRate" :disabled="!assistantSpeechEnabled || !assistantSpeakReplies" aria-label="播报语速"><option :value="1">正常</option><option :value="1.2">较快</option><option :value="1.4">很快</option></select></label>
+                  <span class="assistant-voice-hint">{{ assistantVoiceHint }}</span>
+                </div>
+                <p class="assistant-footnote">回答用于辅助学习与资料检索；现场作业请以现行法规、专项方案和现场安全员指令为准。</p>
+              </footer>
+            </section>
+          </article>
+        </section>
+      </transition>
+
+      <transition name="admin-modal">
+        <section v-if="adminLoginOpen" class="admin-login-overlay" aria-label="项目管理员登录" @click.self="closeAdminLogin" @keydown.esc="closeAdminLogin" tabindex="-1">
+          <article class="admin-login-dialog" role="dialog" aria-modal="true" aria-labelledby="adminLoginTitle">
+            <header class="admin-login-header">
+              <div>
+                <p class="admin-kicker">大屏管理入口</p>
+                <h2 id="adminLoginTitle">项目管理员登录</h2>
+                <p>登录后可查看当前项目的培训视频，不影响正在进行的工人学习。</p>
+              </div>
+              <button class="assistant-close" type="button" @click="closeAdminLogin" aria-label="关闭项目管理员登录">×</button>
+            </header>
+            <form class="admin-login-form" @submit.prevent="submitAdminLogin" novalidate>
+              <div class="admin-field">
+                <label for="screenAdminUsername">登录账号</label>
+                <input id="screenAdminUsername" ref="adminLoginUsername" v-model.trim="adminLoginForm.username" autocomplete="username" maxlength="80" :disabled="adminLoginBusy" placeholder="请输入项目管理员账号" />
+              </div>
+              <div class="admin-field">
+                <label for="screenAdminPassword">登录密码</label>
+                <input id="screenAdminPassword" v-model="adminLoginForm.password" type="password" autocomplete="current-password" maxlength="128" :disabled="adminLoginBusy" placeholder="请输入登录密码" />
+              </div>
+              <p v-if="adminLoginError" class="admin-form-error" role="alert">{{ adminLoginError }}</p>
+              <div class="admin-login-actions">
+                <button class="btn-ghost" type="button" @click="closeAdminLogin" :disabled="adminLoginBusy">取消</button>
+                <button class="btn-primary" type="submit" :disabled="adminLoginBusy || !adminLoginForm.username || !adminLoginForm.password">{{ adminLoginBusy ? '正在验证' : '登录并查看视频' }}</button>
+              </div>
+            </form>
+            <footer class="admin-login-footnote">为保护项目资料，登录凭证仅在当前大屏页面会话中保留。</footer>
+          </article>
+        </section>
+      </transition>
+
+      <transition name="admin-workspace">
+        <section v-if="adminVideoOpen" ref="adminVideoOverlay" class="admin-video-overlay" aria-label="项目培训视频查看" @keydown.esc="closeAdminVideoCenter" tabindex="-1">
+          <article class="admin-video-workspace" role="dialog" aria-modal="true" aria-labelledby="adminVideoTitle">
+            <header class="admin-video-header">
+              <div class="admin-video-heading">
+                <span class="admin-video-mark">视</span>
+                <div>
+                  <p class="admin-kicker">项目培训资料</p>
+                  <h2 id="adminVideoTitle">培训视频查看</h2>
+                  <p>{{ adminSessionLabel }}</p>
+                </div>
+              </div>
+              <div class="admin-video-header-actions">
+                <button class="btn-ghost" type="button" @click="loadAdminVideos" :disabled="adminVideosBusy">刷新列表</button>
+                <button class="assistant-close" type="button" @click="closeAdminVideoCenter" aria-label="关闭培训视频查看">×</button>
+              </div>
+            </header>
+            <div class="admin-video-layout" :aria-busy="adminVideosBusy">
+              <aside class="admin-video-library" aria-label="培训视频列表">
+                <div class="admin-video-library-head">
+                  <label for="adminVideoSearch">搜索培训视频</label>
+                  <input id="adminVideoSearch" v-model.trim="adminVideoSearch" type="search" placeholder="按标题、主题或分类搜索" :disabled="adminVideosBusy" />
+                  <p>{{ filteredAdminVideos.length }} 个可查看视频</p>
+                </div>
+                <div v-if="adminVideosBusy" class="admin-video-list-skeleton" aria-label="正在加载视频列表">
+                  <i></i><i></i><i></i>
+                </div>
+                <p v-else-if="adminVideosError" class="admin-video-list-error" role="alert">{{ adminVideosError }}</p>
+                <div v-else-if="filteredAdminVideos.length" class="admin-video-list">
+                  <button v-for="video in filteredAdminVideos" :key="video.resourceId" class="admin-video-list-item" :class="{ active: video.resourceId === adminSelectedVideo?.resourceId }" type="button" @click="selectAdminVideo(video)">
+                    <span class="admin-video-list-index">{{ adminVideoIndex(video) }}</span>
+                    <span class="admin-video-list-copy">
+                      <strong>{{ video.title || '未命名培训视频' }}</strong>
+                      <small>{{ adminVideoDescriptor(video) }}</small>
+                    </span>
+                    <em :class="'video-state-' + adminVideoStateTone(video)">{{ adminVideoStateLabel(video) }}</em>
+                  </button>
+                </div>
+                <div v-else class="admin-video-empty-list">
+                  <strong>{{ adminVideoSearch ? '没有匹配的视频' : '暂未配置培训视频' }}</strong>
+                  <p>{{ adminVideoSearch ? '请调整关键词后重试。' : '请在项目管理后台上传并发布视频资源。' }}</p>
+                </div>
+              </aside>
+
+              <section class="admin-video-stage" aria-live="polite">
+                <div v-if="adminVideosBusy" class="admin-video-player-skeleton" aria-label="正在加载视频内容"><i></i><i></i><i></i></div>
+                <div v-else-if="adminVideosError" class="admin-video-message admin-video-message-error">
+                  <strong>视频列表加载失败</strong>
+                  <p>{{ adminVideosError }}</p>
+                  <button class="btn-primary" type="button" @click="loadAdminVideos">重新加载</button>
+                </div>
+                <div v-else-if="!adminSelectedVideo" class="admin-video-message">
+                  <strong>请选择一段培训视频</strong>
+                  <p>选择后可在大屏中查看视频内容与资源信息。</p>
+                </div>
+                <template v-else>
+                  <div class="admin-video-title-row">
+                    <div>
+                      <p class="admin-kicker">当前视频</p>
+                      <h3>{{ adminSelectedVideo.title || '未命名培训视频' }}</h3>
+                    </div>
+                    <div class="admin-video-title-actions">
+                      <span :class="'admin-video-state video-state-' + adminVideoStateTone(adminSelectedVideo)">{{ adminVideoStateLabel(adminSelectedVideo) }}</span>
+                      <button class="btn-ghost admin-video-fullscreen" type="button" @click="toggleAdminVideoFullscreen" :disabled="!isAdminVideoPlayable(adminSelectedVideo)" :aria-pressed="adminVideoFullscreen" :aria-label="adminVideoFullscreen ? '退出全屏播放' : '全屏播放'">{{ adminVideoFullscreen ? '退出全屏' : '全屏播放' }}</button>
+                    </div>
+                  </div>
+                  <div class="admin-video-content-grid">
+                    <div class="admin-video-media">
+                      <div class="admin-video-media-stage">
+                        <div ref="adminVideoFrame" class="admin-video-frame" :class="{ unavailable: !isAdminVideoPlayable(adminSelectedVideo) }">
+                          <video v-if="isAdminVideoPlayable(adminSelectedVideo)" ref="adminVideoPlayer" :key="adminSelectedVideo.resourceId" :src="safeAdminVideoUrl(adminSelectedVideo.url)" controls controlslist="nodownload" preload="metadata" @error="handleAdminVideoPlaybackError" @loadedmetadata="clearAdminVideoPlaybackError" @webkitbeginfullscreen="handleAdminVideoFullscreenStart" @webkitendfullscreen="handleAdminVideoFullscreenChange"></video>
+                          <div v-else class="admin-video-unavailable">
+                            <strong>该视频暂时无法播放</strong>
+                            <p>{{ adminVideoUnavailableReason(adminSelectedVideo) }}</p>
+                          </div>
+                        </div>
+                      </div>
+                      <p v-if="adminVideoPlaybackError" class="admin-video-playback-error" role="alert">{{ adminVideoPlaybackError }}</p>
+                    </div>
+                    <dl class="admin-video-details">
+                      <div><dt>培训主题</dt><dd>{{ adminSelectedVideo.theme || '未设置' }}</dd></div>
+                      <div><dt>资源分类</dt><dd>{{ adminSelectedVideo.category || '未设置' }}</dd></div>
+                      <div><dt>视频时长</dt><dd>{{ formatAdminVideoDuration(adminSelectedVideo) }}</dd></div>
+                      <div><dt>资源状态</dt><dd>{{ adminVideoStateLabel(adminSelectedVideo) }}</dd></div>
+                    </dl>
+                  </div>
+                </template>
+              </section>
+            </div>
+          </article>
+        </section>
+      </transition>
+    </main>
+
+    <script src="./vendor/vue.global.prod.js"></script>
+    <script src="./api.js?v=4"></script>
+    <script src="./screen-voice.js?v=3"></script>
+    <script src="./screen.js?v=12"></script>
+  </body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "fenghao-bigscreen",
+  "version": "1.0.0",
+  "private": true,
+  "description": "丰浩大屏安全问答与个人学习终端",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.cjs",
+    "check:screen": "node --check server.cjs && node --check public/api.js && node --check public/screen.js && node --check public/screen-voice.js && node --check public/pcm-worklet.js && node --check voice/frame.mjs && node --check voice/asr.mjs && node --check voice/tts.mjs && node --check voice/bridge.mjs",
+    "test": "npm run check:screen && node --test tests/*.test.cjs"
+  },
+  "dependencies": { "ws": "8.21.3" }
+}

@@ -1,0 +1,91 @@
+# 丰浩大屏：使用说明与前后端应用关系
+
+## 项目职责
+
+本项目是独立大屏终端，源自 fenghao-frontend/management，采用 Vue 3 浏览器运行时 + 原生 CSS/JS + Node HTTP/WebSocket 服务。运行文件直接修改 public/，无需 React、打包器或后台源码同步。
+
+应用关系：
+
+    管理后台（fenghao-frontend/management） ─┐
+    工人 App（fenghao-frontend/app） ──────┼→ Java 后端（fenghao-backend） → 业务数据库/文件
+    大屏浏览器 → 本项目 Node 网关 ────────┘
+                         ├→ 火山联网问答（SSE）
+                         └→ 火山 ASR/TTS（WebSocket）
+
+管理后台负责人员、班组、知识内容、培训安排、设备配置和结果查询；工人 App 负责登录、扫码认领学习会话和手机考试；Java 后端负责身份鉴权、项目隔离、设备会话、培训进度和结果持久化。大屏展示与交互不替代后端业务判定。大屏、后台、App 不直接互相写入数据，均通过后端共享业务状态。
+
+Node 是此大屏的服务端网关，不是 Java 业务后端。它提供静态文件、同源业务接口代理、问答 SSE 和语音 WebSocket，不持有业务数据库。问答与语音直接通过 Node 连接云服务，不经过 Java。
+
+## 启动与配置
+
+1. Node.js >=22；在仓库根目录运行 npm ci。
+2. 复制 .env.example 为 .env，设置 FENGHAO_API_BASE 和云服务凭证。
+3. npm start；打开 http://127.0.0.1:4173/ 或 /screen.html?deviceId=SCR-001。
+4. Java 后端独立启动，详见 README.md。后台和 App 也分别运行，不打包进本仓库。
+
+默认端口 4173，Java 默认 8080。可用 FENGHAO_MANAGEMENT_HOST、FENGHAO_MANAGEMENT_PORT 修改监听设置。系统环境变量优先，其次 FENGHAO_ASSISTANT_ENV 指定文件，再次根目录 .env。没有跨仓库临时路径回退。
+
+浏览器统一使用同源路径，public/api.js 不读取后台管理会话，不提供 apiBase/backend 查询参数覆盖。业务目标由服务器 FENGHAO_API_BASE 统一指定，避免浏览器将设备令牌发送给其他地址。
+
+设备令牌使用 X-Screen-Device-Token；来自页面 deviceToken 参数或此浏览器 localStorage。SCR-DEMO-TOKEN 是现有本地演示默认值，不是生产凭证。设备必须在后端存在且令牌匹配。视频管理使用登录返回的 Bearer token，只保存在页面内存，刷新需重新登录。
+
+## 文件地图
+
+- public/screen.html：页面结构、问答首页、右上方入口、二维码、学习播放和管理员视频界面。
+- public/screen.js：Vue 状态、会话轮询、进度上报、问答流、语音控制、管理员登录和全屏。
+- public/screen.css：大屏布局和人物状态样式。
+- public/api.js：仅大屏设备与学习会话 API，固定同源调用。
+- public/screen-voice.js、pcm-worklet.js：麦克风 PCM 采集、缓存、播放与语音状态。
+- public/assets/：当前高清人物两张图片与透明循环视频；不包含历史废弃素材。
+- public/vendor/vue.global.prod.js：Vue 3.5.13，保留文件头 MIT 版权声明。
+- server.cjs：配置加载、静态服务、Java 代理、云问答转发、语音桥接启动。
+- voice/frame.mjs、asr.mjs、tts.mjs、bridge.mjs：语音协议、识别、合成和连接管理。
+- tests/：页面行为、语音协议、视频权限以及独立网关/API 验证。
+
+## 接口归属与业务流程
+
+| 入口 | 方法与路径 | 服务端归属 / 用途 |
+| --- | --- | --- |
+| 问答状态 | GET /api/v1/assistant/status | Node；configured/speech 表示凭证是否齐备，不代表云端已实测可用 |
+| 问答 | POST /api/v1/assistant/chat | Node → 火山 Agent；SSE 流式响应 |
+| 语音 | WS /ws/voice | Node → 火山 ASR/TTS；PCM 与控制消息 |
+| 设备配置 | GET /api/v1/screen-devices/{deviceId}/config | Java ScreenLearningController；需设备令牌 |
+| 创建会话 | POST /api/v1/screen-sessions | Java；请求体 {deviceId} |
+| 会话轮询 | GET /api/v1/screen-sessions/{sessionId} | Java；等待扫码阶段约每 2 秒读取 |
+| 签到 | POST /api/v1/screen-sessions/{sessionId}/checkin | Java；工人确认开始学习 |
+| 学习视频 | GET /api/v1/screen-sessions/{sessionId}/videos | Java；已提供 API，当前界面也使用会话响应内 videos |
+| 进度上报 | POST /api/v1/screen-sessions/{sessionId}/progress | Java；videoId/progress/currentTime/duration/status |
+| 完成学习 | POST /api/v1/screen-sessions/{sessionId}/complete | Java；学习完成状态 |
+| 清空会话 | POST /api/v1/screen-sessions/{sessionId}/clear | Java；reason=screen_page，之后可生成新会话 |
+| 管理员登录 | POST /api/v1/admin/auth/login | Java；项目管理员登录 |
+| 视频资料 | GET /api/v1/admin/training-resources?type=VIDEO | Java；项目内视频资料与状态 |
+| 媒体资源 | /files/* | Node 转发 Java；视频文件播放 |
+| 工人扫码 | GET /api/v1/app/scan/resolve?code=... | App → Java；解析二维码 |
+| 工人认领 | POST /api/v1/app/screen-sessions/{sessionId}/claim | App → Java；把登录工人与学习会话关联 |
+| 手机考试 | /api/v1/app/trainings/{assignmentId}/exam/... | App → Java AppTrainingController；考试开始与提交 |
+
+学习闭环：后台配置培训内容与设备 → 大屏创建二维码会话 → App 扫码认领 → 大屏轮询取得人员身份 → 确认签到 → 播放课程并上报 → 学习完成 → App 考试 → 后台查询记录。设备会话、学习进度、考试结果的最终依据均为 Java 后端。
+
+状态主要为 waiting_scan → worker_identified → checked_in/playing → learning_completed，另有 expired/error。管理员视频查看是资料浏览，不等价于工人的学习完成或考试通过。
+
+## 必须保留的交互约定
+
+- 首页默认安全问答，初次加载和重新进入都不自动开启聆听。用户点击“开始聆听”才调用麦克风。
+- 右上方“扫码学习”切换学习界面；“视频播放”进入项目管理员视频查看流程。
+- 打开问答时检查云服务状态，并与设备初始化独立进行；Java 不可用时问答页面仍可展示。
+- 关闭问答必须停止聆听/播报；保留已有打断缓存机制，识别连接就绪前不能丢掉首句。
+- 聆听/思考使用思考姿态图片；播报使用 speaking-loop.webm，容器 animation:none、transform:none。
+- 循环素材已按约 1.3 倍速处理，不能再设为 1.3 重复加速。嘴部为视频内动作，不再叠加 CSS 假嘴；素材不保证逐字口型同步。
+- 语音回答通常 1-3 句、80 字以内，限定施工与工程安全；播报语速参数需传到服务端 TTS。
+- 语音链：浏览器 PCM16/16k → ASR；TTS PCM16/24k → 浏览器。WS 正在握手时避免提前 close。
+- 视频查看仅接受项目管理员角色；PROCESSING/PENDING/UPLOADING/FAILED/ERROR 视频不可播放。视频 URL 限 HTTP/HTTPS。
+
+## 修改与验收
+
+先阅读本文件与相关实现，再修改。UI 改动位于 public/，修改资源后更新 screen.html 中对应缓存版本。Node/环境配置改动需重启；静态文件刷新生效。不要执行后台的 sync:public-src。
+
+执行 npm test，至少确认：首页待机、手动开始聆听、关闭再进入不自动录音、扫码入口、管理员视频权限、人物播报稳定。npm test 不调用真实云服务；真实 ASR/TTS、摄像/麦克风授权、App 扫码考试闭环需要配置和对应设备现场联调。
+
+环境文件、密钥、真实账号、数据库、日志与 node_modules 不入库。公开静态文件仅限 public/；不要把配置文件或业务数据库复制到其中。不要向前端暴露火山 API key。部署需 HTTPS 或 localhost、允许麦克风，并支持 WS Upgrade/SSE。
+
+此仓库是新的大屏维护源，原 fenghao-frontend/management 仍有历史大屏副本。本次是单次提取，没有自动双向同步；后续大屏改动优先在本仓库完成，需要回移时明确执行，防止两份实现漂移。
