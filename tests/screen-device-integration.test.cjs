@@ -88,3 +88,35 @@ test("后台清空设备会话后独立轮询停止旧视频并重新进入扫�
   assert.equal(screen.session.sessionId, "S2");
   assert.equal(screen.stage, "waiting");
 });
+
+test("问答设备认证失败指向配对，不冒充服务端缺少语音配置", async () => {
+  const { screen } = loadScreen(async () => ({ rawResponse: { ok: false, status: 401 } }), { createVoice: () => ({ isAvailable: () => true }) });
+  screen.deviceId = "D1"; screen.deviceToken = "expired-token";
+  await screen.checkAssistantStatus();
+  assert.match(screen.assistantConnection, /设备配对/);
+  assert.match(screen.assistantVoiceHint, /设备配对/);
+  assert.doesNotMatch(screen.assistantVoiceHint, /缺少.*配置/);
+  assert.equal(screen.assistantSpeechEnabled, false);
+});
+
+test("尚无设备身份时网络失败仍先指向配对", async () => {
+  const { screen } = loadScreen(async () => { throw new Error("network unavailable"); }, { createVoice: () => ({ isAvailable: () => true }) });
+  await screen.checkAssistantStatus();
+  assert.match(screen.assistantVoiceHint, /设备配对/);
+});
+
+test("已配对状态查询暂不可用不猜测语音配置缺失", async () => {
+  const { screen } = loadScreen(async () => ({ rawResponse: { ok: false, status: 503 } }), { createVoice: () => ({ isAvailable: () => true }) });
+  screen.deviceId = "D1"; screen.deviceToken = "synthetic-token";
+  await screen.checkAssistantStatus();
+  assert.match(screen.assistantVoiceHint, /暂无法确认.*稍后重试/);
+  assert.doesNotMatch(screen.assistantVoiceHint, /缺少.*配置|设备配对/);
+});
+
+test("认证成功且服务端明确speech=false时保留未配置提示", async () => {
+  const { screen } = loadScreen(async () => ({ rawResponse: { ok: true, json: async () => ({ configured: true, speech: false }) } }), { createVoice: () => ({ isAvailable: () => true }) });
+  screen.deviceId = "D1"; screen.deviceToken = "synthetic-token";
+  await screen.checkAssistantStatus();
+  assert.equal(screen.assistantVoiceHint, "语音未启用：服务端缺少语音识别与合成配置");
+  assert.equal(screen.assistantSpeechEnabled, false);
+});

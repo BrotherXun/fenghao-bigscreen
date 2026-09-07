@@ -978,7 +978,7 @@ createApp({
     async checkAssistantStatus() {
       try {
         const response = await fetch("/api/v1/assistant/status", { cache: "no-store", headers: this.deviceHeaders() });
-        if (!response.ok) throw new Error("问答服务不可用");
+        if (!response.ok) throw Object.assign(new Error("问答服务不可用"), { status: response.status });
         const status = await response.json();
         if (status.configured) {
           this.assistantConnection = "联网问答已配置 · 待实际提问验证";
@@ -989,9 +989,10 @@ createApp({
         }
         this.assistantSpeechConfigured = Boolean(status.speech);
         this.setupAssistantVoice();
-      } catch (_) {
-        this.assistantConnection = "服务暂不可用";
-        this.assistantConnectionMode = "error";
+      } catch (error) {
+        const pairingRequired = !this.deviceId || !this.deviceToken || error.status === 401;
+        this.assistantConnection = pairingRequired ? "请先完成大屏设备配对" : "服务暂不可用";
+        this.assistantConnectionMode = pairingRequired ? "pairing" : "error";
         this.assistantSpeechConfigured = false;
         this.setupAssistantVoice();
       }
@@ -1024,7 +1025,11 @@ createApp({
       }
       const browserSupported = Boolean(this.assistantVoice?.isAvailable?.());
       this.assistantSpeechEnabled = this.assistantSpeechConfigured && browserSupported;
-      if (!browserSupported) {
+      if (this.assistantConnectionMode === "pairing") {
+        this.assistantVoiceHint = "请先完成大屏设备配对，再使用语音问答";
+      } else if (this.assistantConnectionMode === "error") {
+        this.assistantVoiceHint = "语音服务状态暂无法确认，请稍后重试";
+      } else if (!browserSupported) {
         this.assistantVoiceHint = "当前浏览器不支持录音，请使用 Chrome 或 Edge";
       } else if (!this.assistantSpeechConfigured) {
         this.assistantVoiceHint = "语音未启用：服务端缺少语音识别与合成配置";
