@@ -15,6 +15,7 @@ function loadScreen(handleRequest) {
   const calls = [];
   const sandbox = {
     URL, URLSearchParams,
+    crypto: require("node:crypto").webcrypto,
     location: { search: "", origin: "http://test.invalid" },
     localStorage: { getItem() { return null; }, setItem() {} },
     setInterval() { return 1; }, clearInterval() {},
@@ -45,7 +46,31 @@ function loadScreen(handleRequest) {
 }
 
 const complete = (overrides = {}) => ({ sessionId: "S1", status: "learning_completed", allCompleted: true, examUnlocked: true, ...overrides });
-const progress = (overrides = {}) => ({ sessionId: "S1", videoId: "V1", progress: 100, status: "finished", videoCompleted: true, allCompleted: false, examUnlocked: false, ...overrides });
+const progress = (overrides = {}) => ({ acceptedPositionMs: 60000, maxWatchedPositionMs: 60000, watchedMs: 60000, coveragePercent: 100, completionStatus: "COMPLETED", gateStatus: "LEARNING_REQUIRED", blockedReasonCode: "VIDEO_NOT_COMPLETED", ...overrides });
+
+function loadPlaybackScreen(handleRequest) {
+  const h = loadScreen(call => {
+    if (call.url.endsWith("/playback-sessions")) return {
+      playbackSessionId: "P1", assignmentId: "A1", unitId: "U1", resourceId: "V1", durationMs: 60000,
+      lastSequence: 0, acceptedPositionMs: 0, maxWatchedPositionMs: 0, watchedMs: 0, coveragePercent: 0,
+      completionStatus: "ACTIVE", gateStatus: "LEARNING_REQUIRED",
+    };
+    if (call.body?.type === "START") return progress({ acceptedPositionMs: 0, coveragePercent: 0, completionStatus: "ACTIVE" });
+    return handleRequest(call);
+  });
+  h.screen.session.assignmentId = "A1";
+  h.screen.videos.forEach((video, index) => Object.assign(video, { unitId: "U" + (index + 1), assignmentId: "A1", videoUrl: "/files/video.mp4", mustComplete: true }));
+  h.screen.$refs.learningVideo = { dataset: { videoId: "V1" }, currentTime: 0, playbackRate: 1, ended: false, paused: false, pause() { this.paused = true; }, async play() { this.paused = false; } };
+  return h;
+}
+
+async function finishVideoPlayback(screen) {
+  await screen.onLearningPlay({ currentTarget: screen.$refs.learningVideo });
+  screen.$refs.learningVideo.currentTime = 60;
+  screen.$refs.learningVideo.ended = true;
+}
+
+const flushRequests = () => new Promise(resolve => setImmediate(resolve));
 
 test("完成请求失败保留播放页和错误，不宣称考试已解锁", async () => {
   const { screen } = loadScreen(async () => { throw new Error("还有必学视频未完成"); });
@@ -75,10 +100,11 @@ test("完成响应未确认全部完成时仍可重试", async () => {
 
 test("上报失败不跳段，重试成功正常推进并清除旧错误", async () => {
   let failed = true;
-  const { screen, calls } = loadScreen(async () => {
+  const { screen, calls } = loadPlaybackScreen(async () => {
     if (failed) throw new Error("进度保存失败");
     return progress();
   });
+  await finishVideoPlayback(screen);
   await screen.finishCurrentVideo();
   assert.equal(screen.currentIndex, 0);
   assert.equal(screen.videos[0].progress, 0);
@@ -89,22 +115,25 @@ test("上报失败不跳段，重试成功正常推进并清除旧错误", async
   assert.equal(screen.currentIndex, 1);
   assert.equal(screen.videos[0].progress, 100);
   assert.equal(screen.error, "");
-  assert.equal(calls[1].body.videoId, "V1");
+  assert.ok(calls.filter(call => call.body?.type === "ENDED").every(call => call.url.includes("/units/U1/")));
 });
 
 test("最终视频进度及考试解锁均确认后进入完成页", async () => {
-  const { screen, calls } = loadScreen(async ({ url }) => url.endsWith("/complete") ? complete() : progress({ allCompleted: true }));
+  const { screen, calls } = loadPlaybackScreen(async ({ url }) => url.endsWith("/complete") ? complete({ assignmentId: "A1", gate: { status: "EXAM_READY" } }) : progress({ gateStatus: "EXAM_READY" }));
+  screen.videos.length = 1;
+  await finishVideoPlayback(screen);
   await screen.finishCurrentVideo();
   assert.equal(screen.stage, "completed");
   assert.match(screen.message, /已解锁/);
   assert.equal(screen.session.status, "learning_completed");
   assert.equal(screen.currentIndex, 0);
   assert.equal(screen.busy, false);
-  assert.equal(calls[1].url, "/api/v1/screen-sessions/S1/complete");
+  assert.equal(calls.at(-1).url, "/api/v1/screen-sessions/S1/complete");
 });
 
 test("上报成功但服务端未确认本段完成时不跳段", async () => {
-  const { screen } = loadScreen(async () => progress({ progress: 50, status: "playing", videoCompleted: false }));
+  const { screen } = loadPlaybackScreen(async () => progress({ coveragePercent: 50, completionStatus: "ACTIVE" }));
+  await finishVideoPlayback(screen);
   await screen.finishCurrentVideo();
   assert.equal(screen.currentIndex, 0);
   assert.equal(screen.videos[0].progress, 50);
@@ -113,20 +142,25 @@ test("上报成功但服务端未确认本段完成时不跳段", async () => {
 
 test("切换视频后旧进度只更新原视频且不自动移动当前选择", async () => {
   const response = deferred();
-  const { screen, calls } = loadScreen(() => response.promise);
+  const { screen, calls } = loadPlaybackScreen(() => response.promise);
+  await finishVideoPlayback(screen);
   const pending = screen.finishCurrentVideo();
+  await flushRequests();
   screen.currentIndex = 1;
   response.resolve(progress());
   await pending;
-  assert.equal(calls[0].body.videoId, "V1");
+  assert.ok(calls.at(-1).url.includes("/units/U1/"));
   assert.equal(screen.videos[0].progress, 100);
   assert.equal(screen.videos[1].progress, 0);
   assert.equal(screen.currentIndex, 1);
 });
 
-test("其他视频的进度响应不得写入当前视频", async () => {
-  const { screen } = loadScreen(async () => progress({ videoId: "V2" }));
-  await screen.finishCurrentVideo();
+test("其他视频的播放会话不得用于当前视频", async () => {
+  const { screen } = loadScreen(async () => ({ playbackSessionId: "P2", assignmentId: "A1", unitId: "U1", resourceId: "V2" }));
+  screen.session.assignmentId = "A1";
+  Object.assign(screen.videos[0], { unitId: "U1", videoUrl: "/files/video.mp4" });
+  screen.$refs.learningVideo = { dataset: { videoId: "V1" }, pause() {} };
+  await screen.onLearningPlay({ currentTarget: screen.$refs.learningVideo });
   assert.equal(screen.videos[0].progress, 0);
   assert.equal(screen.currentIndex, 0);
   assert.match(screen.error, /不匹配/);
@@ -135,20 +169,22 @@ test("其他视频的进度响应不得写入当前视频", async () => {
 for (const failure of [false, true]) {
   test(`换会话后旧进度${failure ? "失败" : "完成"}响应不污染新会话`, async () => {
     const response = deferred();
-    const { screen, calls } = loadScreen(() => response.promise);
+    const { screen, calls } = loadPlaybackScreen(() => response.promise);
+    await finishVideoPlayback(screen);
     const pending = screen.finishCurrentVideo();
+    await flushRequests();
     screen.session = { sessionId: "S2", status: "playing" };
     screen.videos = [{ videoId: "V1", progress: 0 }];
     screen.error = "新会话提示";
     screen.busy = true;
     if (failure) response.reject(new Error("旧会话失败"));
-    else response.resolve(progress({ allCompleted: true }));
+    else response.resolve(progress({ gateStatus: "EXAM_READY" }));
     await pending;
     assert.equal(screen.videos[0].progress, 0);
     assert.equal(screen.stage, "playing");
     assert.equal(screen.error, "新会话提示");
     assert.equal(screen.busy, true);
-    assert.equal(calls.length, 1);
+    assert.equal(calls.length, 3);
   });
 }
 
@@ -207,11 +243,13 @@ test("当前轮询完成状态还需确认考试是否解锁", async () => {
 
 test("最后进度已保存但完成确认失败时留在当前段并可重试", async () => {
   let failed = true;
-  const { screen } = loadScreen(async ({ url }) => {
-    if (!url.endsWith("/complete")) return progress({ allCompleted: true });
+  const { screen } = loadPlaybackScreen(async ({ url }) => {
+    if (!url.endsWith("/complete")) return progress({ gateStatus: "EXAM_READY" });
     if (failed) throw new Error("完成确认暂不可用");
-    return complete();
+    return complete({ assignmentId: "A1", gate: { status: "EXAM_READY" } });
   });
+  screen.videos.length = 1;
+  await finishVideoPlayback(screen);
   await screen.finishCurrentVideo();
   assert.equal(screen.stage, "playing");
   assert.equal(screen.currentIndex, 0);
@@ -225,13 +263,15 @@ test("最后进度已保存但完成确认失败时留在当前段并可重试",
 });
 
 test("正常部分进度保存不触发跳段或完成请求", async () => {
-  const { screen, calls } = loadScreen(async () => progress({ progress: 50, status: "playing", videoCompleted: false }));
+  const { screen, calls } = loadPlaybackScreen(async () => progress({ acceptedPositionMs: 30000, coveragePercent: 50, completionStatus: "ACTIVE" }));
+  await screen.onLearningPlay({ currentTarget: screen.$refs.learningVideo });
+  screen.$refs.learningVideo.currentTime = 30;
   await screen.reportProgress(50);
   assert.equal(screen.videos[0].progress, 50);
   assert.equal(screen.currentIndex, 0);
   assert.equal(screen.stage, "playing");
   assert.equal(screen.error, "");
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 3);
 });
 
 test("清空成功后新会话创建失败仍展示可重试错误", async () => {

@@ -46,7 +46,18 @@
     var micSource = null;
 
     var connected = false;
+    var connectionPromise = null;
+    var connectionTimer = null;
+    var asrRetryTimer = null;
+    var asrFailures = 0;
+    var speechGeneration = 0;
+    var ttsRequestId = "";
+    var ttsReady = false;
+    var ttsReadyTimer = null;
+    var ttsTextQueue = [];
+    var ttsFinishPending = false;
     var listening = false;      // 麦克风开关（用户意图）
+    var listeningGeneration = 0;
     var asrActive = false;      // 是否正在向识别服务送音频
     var asrReady = false;       // 火山识别连接已完成配置，可接收 PCM
     var asrStopPending = false; // 用户已说完，但识别握手尚未完成
@@ -81,7 +92,7 @@
     }
 
     function send(payload) {
-      if (socket && socket.readyState === WebSocket.OPEN) {
+      if (connected && socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(payload));
       }
     }
@@ -256,6 +267,9 @@
       send({ type: "tts_cancel" });
       stopPlayback();
       awaitingTtsEnd = false;
+      speechGeneration += 1;
+      resetTtsBuffer();
+      if (handlers.onInterrupt) handlers.onInterrupt();
       resumeListening(preRoll);
     }
 
@@ -336,41 +350,74 @@
     // ---------- 连接 ----------
 
     function connect() {
-      if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
-        return Promise.resolve(connected);
+      if (connected && socket && socket.readyState === WebSocket.OPEN) return Promise.resolve(true);
+      if (connectionPromise) return connectionPromise;
+      if (!handlers.deviceId || !handlers.deviceToken) {
+        fail("connection", "请先配置有效的设备编号和令牌。");
+        return Promise.resolve(false);
       }
-      return new Promise(function (resolve) {
+      connectionPromise = new Promise(function (resolve) {
         var protocol = location.protocol === "https:" ? "wss://" : "ws://";
         var next = new WebSocket(protocol + location.host + "/ws/voice");
         next.binaryType = "arraybuffer";
         socket = next;
+        var settled = false;
+        function finish(ok) {
+          if (settled) return;
+          settled = true;
+          if (connectionTimer) clearTimeout(connectionTimer);
+          connectionTimer = null;
+          connectionPromise = null;
+          resolve(ok);
+        }
+        connectionTimer = setTimeout(function () {
+          if (socket !== next) return;
+          connected = false;
+          finish(false);
+          socket = null;
+          if (next.readyState === WebSocket.OPEN) next.close();
+          fail("connection", "设备语音认证超时，请重试。");
+        }, 8000);
 
         next.onopen = function () {
-          connected = true;
-          resolve(true);
+          if (socket !== next) { next.close(); return; }
+          next.send(JSON.stringify({ type: "authenticate", deviceId: handlers.deviceId, deviceToken: handlers.deviceToken }));
         };
         next.onclose = function () {
+          finish(false);
+          if (socket !== next) return;
+          socket = null;
           connected = false;
-          if (listening) {
-            listening = false;
-            releaseMic();
-            emitState("idle");
-            fail("connection", "语音通道已断开。");
-          }
-          resolve(false);
+          stopListening();
+          fail("connection", "语音通道已断开，请重试。");
         };
         next.onerror = function () {
+          finish(false);
+          if (socket !== next) return;
           connected = false;
-          resolve(false);
+          stopListening();
         };
         next.onmessage = function (event) {
+          if (socket !== next) return;
           if (typeof event.data !== "string") {
-            enqueueAudio(event.data);
+            if (connected && ttsReady && awaitingTtsEnd) enqueueAudio(event.data);
             return;
           }
-          handleControl(JSON.parse(event.data));
+          var message;
+          try { message = JSON.parse(event.data); }
+          catch (_) { fail("connection", "语音服务返回无效消息。"); next.close(); return; }
+          if (message.type === "authenticated") {
+            connected = true;
+            finish(true);
+          } else if (connected) handleControl(message);
+          else if (message.type === "error") {
+            fail("connection", message.message || "设备语音认证失败。");
+            finish(false);
+            next.close();
+          }
         };
       });
+      return connectionPromise;
     }
 
     function handleControl(message) {
@@ -395,19 +442,38 @@
           handleFinalTranscript(message.text || "");
           break;
         case "tts_begin":
+          if (message.requestId !== ttsRequestId || !awaitingTtsEnd) break;
+          ttsReady = true;
+          if (ttsReadyTimer) clearTimeout(ttsReadyTimer);
+          ttsReadyTimer = null;
           ttsSampleRate = message.sampleRate || ttsSampleRate;
+          ttsTextQueue.forEach(function (text) { send({ type: "tts_text", text: text }); });
+          ttsTextQueue = [];
+          if (ttsFinishPending) { ttsFinishPending = false; send({ type: "tts_end" }); }
           break;
         case "tts_end":
+          if (message.requestId !== ttsRequestId) break;
+          resetTtsBuffer();
           awaitingTtsEnd = false;
           if (!activeSources.length) {
             finishPlayback();
           }
           break;
         case "error":
+          if (message.scope === "tts" && message.requestId !== ttsRequestId) break;
           fail(message.scope, message.message);
+          if (message.scope === "auth") { stopListening(); if (socket?.readyState === WebSocket.OPEN) socket.close(); }
+          if (message.scope === "tts") { resetTtsBuffer(); awaitingTtsEnd = false; stopPlayback(); }
           if (message.scope === "asr") {
             resetAsrBuffer();
-            resumeListening();
+            asrActive = false;
+            if (asrRetryTimer) clearTimeout(asrRetryTimer);
+            if (message.retryable === false || asrFailures >= 3) {
+              stopListening();
+            } else if (listening) {
+              var delay = 1000 * Math.pow(2, asrFailures++);
+              asrRetryTimer = setTimeout(function () { asrRetryTimer = null; resumeListening(); }, delay);
+            }
           }
           break;
         default:
@@ -418,6 +484,8 @@
     function handleFinalTranscript(text) {
       var value = String(text || "").trim();
       resetAsrBuffer();
+      asrActive = false;
+      asrFailures = 0;
       handlers.onPartialTranscript("");
       if (!value) {
         resumeListening();
@@ -466,7 +534,8 @@
         var clean = sentence.trim();
         // 只剩标点或空白的片段不值得发一次合成请求。
         if (clean && /[\p{L}\p{N}]/u.test(clean)) {
-          send({ type: "tts_text", text: clean });
+          if (ttsReady) send({ type: "tts_text", text: clean });
+          else ttsTextQueue.push(clean);
           spokenFirstSentence = true;
         }
         sentence = takeSentence(force);
@@ -474,6 +543,33 @@
     }
 
     // ---------- 对外接口 ----------
+
+    function resetTtsBuffer() {
+      ttsReady = false;
+      ttsTextQueue = [];
+      ttsFinishPending = false;
+      if (ttsReadyTimer) clearTimeout(ttsReadyTimer);
+      ttsReadyTimer = null;
+    }
+
+    function stopListening() {
+      listeningGeneration += 1;
+      listening = false;
+      asrActive = false;
+      speechGeneration += 1;
+      resetTtsBuffer();
+      if (asrRetryTimer) clearTimeout(asrRetryTimer);
+      asrRetryTimer = null;
+      resetAsrBuffer();
+      bargeInAudio = [];
+      send({ type: "asr_abort" });
+      awaitingTtsEnd = false;
+      speechBuffer = "";
+      send({ type: "tts_cancel" });
+      stopPlayback();
+      releaseMic();
+      emitState("idle");
+    }
 
     return {
       isAvailable: function () {
@@ -491,38 +587,28 @@
         if (listening) {
           return true;
         }
+        var generation = ++listeningGeneration;
         var ok = await connect();
+        if (generation !== listeningGeneration) return false;
         if (!ok) {
           fail("connection", "无法连接语音通道，请确认服务端已配置语音密钥。");
           return false;
         }
         try {
           await ensureMic();
+          if (generation !== listeningGeneration) { releaseMic(); return false; }
         } catch (error) {
           fail("mic", "无法访问麦克风：" + (error && error.message || "权限被拒绝"));
           return false;
         }
         ensurePlaybackContext();
+        asrFailures = 0;
         listening = true;
         resumeListening();
         return true;
       },
 
-      stopListening: function () {
-        listening = false;
-        asrActive = false;
-        resetAsrBuffer();
-        bargeInAudio = [];
-        send({ type: "asr_abort" });
-        // 关麦克风的同时必须掐掉播报：否则音频会继续播完，
-        // 而此时麦克风已关、开口打断也失效，等于没有任何办法叫停。
-        awaitingTtsEnd = false;
-        speechBuffer = "";
-        send({ type: "tts_cancel" });
-        stopPlayback();
-        releaseMic();
-        emitState("idle");
-      },
+      stopListening: stopListening,
 
       // 在用户主动发送问题时调用，避免浏览器把首段播报当成非用户触发的自动播放。
       preparePlayback: function () {
@@ -530,13 +616,30 @@
       },
 
       // 提问瞬间调用：预热合成连接，等第一句文本到达时握手已完成。
-      beginSpeech: function (speedRatio) {
+      beginSpeech: async function (speedRatio) {
+        var generation = ++speechGeneration;
+        resetTtsBuffer();
+        ttsRequestId = String(generation);
         speechBuffer = "";
         spokenFirstSentence = false;
         awaitingTtsEnd = true;
         stopPlayback();
         emitState("thinking");
-        send({ type: "tts_start", speedRatio: Number(speedRatio) || 1.2 });
+        var ok = await connect();
+        if (!ok || generation !== speechGeneration) {
+          if (generation === speechGeneration) { awaitingTtsEnd = false; emitState("idle"); }
+          return false;
+        }
+        send({ type: "tts_start", requestId: ttsRequestId, speedRatio: Number(speedRatio) || 1.2 });
+        ttsReadyTimer = setTimeout(function () {
+          if (generation !== speechGeneration || ttsReady) return;
+          resetTtsBuffer();
+          awaitingTtsEnd = false;
+          send({ type: "tts_cancel" });
+          fail("tts", "语音播报准备超时，回答文字仍可查看。");
+          finishPlayback();
+        }, 20000);
+        return true;
       },
 
       pushText: function (delta) {
@@ -554,10 +657,13 @@
           return;
         }
         flushSentences(true);
-        send({ type: "tts_end" });
+        if (ttsReady) send({ type: "tts_end" });
+        else ttsFinishPending = true;
       },
 
       cancelSpeech: function () {
+        speechGeneration += 1;
+        resetTtsBuffer();
         awaitingTtsEnd = false;
         speechBuffer = "";
         send({ type: "tts_cancel" });

@@ -95,7 +95,7 @@
                 <div><p>学习内容</p><strong>{{ videos.length }} 个课程片段</strong></div>
                 <span>{{ overallProgress }}%</span>
               </div>
-              <button v-for="(video,index) in videos" :key="video.videoId" class="pl-item" :class="{active:index===currentIndex, done:video.progress>=100}" type="button" @click="currentIndex=index">
+              <button v-for="(video,index) in videos" :key="video.videoId" class="pl-item" :class="{active:index===currentIndex, done:video.progress>=100}" type="button" @click="selectLearningVideo(index)">
                 <span class="pl-idx">{{ index + 1 }}</span>
                 <span class="pl-body">
                   <strong>{{ video.title }}</strong>
@@ -108,16 +108,16 @@
               <p class="section-hint">正在播放</p>
               <h2 class="player-title">{{ currentVideo?.title || '暂无视频' }}</h2>
               <div class="player-screen">
-                <video v-if="currentVideo?.videoUrl" :src="currentVideo.videoUrl" controls autoplay @ended="finishCurrentVideo"></video>
+                <video v-if="currentVideo?.videoUrl" ref="learningVideo" :key="currentVideo.videoId" :data-video-id="currentVideo.videoId" :src="currentVideo.videoUrl" controls :autoplay="device.playback?.autoPlay !== false" @loadedmetadata="onLearningMetadata" @play="onLearningPlay" @pause="onLearningPause" @timeupdate="onLearningTimeUpdate" @seeking="onLearningSeeking" @seeked="onLearningSeeked" @ended="onLearningEnded"></video>
                 <div v-else class="player-mock">
                   <span class="mock-icon">▶</span>
                   <strong>数字人安全教育视频</strong>
-                  <p class="muted">当前课程未配置视频地址，可点击下方按钮模拟播放完成。</p>
+                  <p class="muted">当前课程未配置视频地址，无法完成学习，请联系项目管理员。</p>
                 </div>
               </div>
               <div class="player-actions">
-                <button class="btn-ghost" type="button" @click="reportProgress(50)" :disabled="busy || !currentVideo">上报 50%</button>
-                <button class="btn-primary" type="button" @click="finishCurrentVideo" :disabled="busy || !currentVideo">本段学习完成</button>
+                <button class="btn-ghost" type="button" @click="reportProgress" :disabled="busy || !currentVideo">保存播放记录</button>
+                <button class="btn-primary" type="button" @click="finishCurrentVideo" :disabled="busy || !currentVideo">检查本段完成</button>
                 <button class="btn-ghost" type="button" @click="nextVideo" :disabled="busy || currentIndex >= videos.length - 1">下一段</button>
               </div>
             </section>

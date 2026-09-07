@@ -52,6 +52,7 @@ export class AsrSession {
           resolve();
         } catch (error) {
           settled = true;
+          this.close();
           reject(error);
         }
       });
@@ -69,10 +70,11 @@ export class AsrSession {
         const failure = new Error("语音识别连接失败：" + (error && error.message || "未知错误"));
         if (!settled) {
           settled = true;
+          this.close();
           reject(failure);
           return;
         }
-        this.onError(failure);
+        this.fail(failure);
       });
 
       socket.on("close", () => {
@@ -81,6 +83,8 @@ export class AsrSession {
         if (!settled) {
           settled = true;
           reject(new Error(cancelled ? "语音识别请求已取消。" : "语音识别连接被服务端关闭。"));
+        } else if (!cancelled) {
+          this.onError(new Error("语音识别连接已关闭，未收到最终识别结果。"));
         }
       });
     });
@@ -114,7 +118,7 @@ export class AsrSession {
   }
 
   ready() {
-    return Boolean(this.socket) && this.socket.readyState === WebSocket.OPEN && !this.finished;
+    return Boolean(this.socket) && this.socket.readyState === WebSocket.OPEN && !this.finished && !this.closed;
   }
 
   sendAudio(chunk) {
@@ -150,18 +154,18 @@ export class AsrSession {
   }
 
   handleMessage(data) {
+    if (this.closed) return;
     let frame;
     try {
       frame = decodeFrame(data);
     } catch (error) {
-      this.onError(new Error("语音识别返回帧解析失败：" + error.message));
+      this.fail(new Error("语音识别返回帧解析失败：" + error.message));
       return;
     }
 
     if (frame.messageType === MESSAGE_TYPE.ERROR_INFORMATION) {
       const detail = frame.payload.toString("utf8").slice(0, 200);
-      this.onError(new Error("语音识别服务报错（" + frame.errorCode + "）：" + detail));
-      this.close();
+      this.fail(new Error("语音识别服务报错（" + frame.errorCode + "）：" + detail));
       return;
     }
 
@@ -176,6 +180,12 @@ export class AsrSession {
       this.onFinal(this.text);
       this.close();
     }
+  }
+
+  fail(error) {
+    if (this.closed) return;
+    this.close();
+    this.onError(error);
   }
 
   close() {

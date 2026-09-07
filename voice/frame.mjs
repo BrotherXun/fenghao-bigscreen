@@ -107,6 +107,7 @@ export function decodeFrame(input) {
   }
 
   const headerSize = (buffer[0] & 0x0f) * 4;
+  if (headerSize < 4 || headerSize > buffer.length) throw new Error("语音服务返回的帧头长度无效。");
   const messageType = buffer[1] >> 4;
   const flags = buffer[1] & 0x0f;
   const serialization = buffer[2] >> 4;
@@ -128,11 +129,13 @@ export function decodeFrame(input) {
 
   let offset = headerSize;
   const readUInt32 = () => {
+    if (offset + 4 > buffer.length) throw new Error("语音服务返回的整数或长度字段不完整。");
     const value = buffer.readUInt32BE(offset);
     offset += 4;
     return value;
   };
   const readInt32 = () => {
+    if (offset + 4 > buffer.length) throw new Error("语音服务返回的序列字段不完整。");
     const value = buffer.readInt32BE(offset);
     offset += 4;
     return value;
@@ -144,6 +147,7 @@ export function decodeFrame(input) {
     result.event = readInt32();
     if (!CONNECTION_SCOPE_EVENTS.has(result.event)) {
       const idLength = readUInt32();
+      if (idLength > buffer.length - offset) throw new Error("语音服务返回的会话字段不完整。");
       result.sessionId = buffer.subarray(offset, offset + idLength).toString("utf8");
       offset += idLength;
     }
@@ -151,18 +155,13 @@ export function decodeFrame(input) {
     result.sequence = readInt32();
   }
 
-  if (offset + 4 <= buffer.length) {
-    const payloadSize = readUInt32();
-    const raw = buffer.subarray(offset, offset + payloadSize);
-    result.payload = compression === COMPRESSION.GZIP && raw.length ? gunzipSync(raw) : Buffer.from(raw);
-  }
+  const payloadSize = readUInt32();
+  if (payloadSize > buffer.length - offset) throw new Error("语音服务返回的负载不完整。");
+  const raw = buffer.subarray(offset, offset + payloadSize);
+  result.payload = compression === COMPRESSION.GZIP && raw.length ? gunzipSync(raw) : Buffer.from(raw);
 
   if (result.payload.length && serialization === SERIALIZATION.JSON) {
-    try {
-      result.json = JSON.parse(result.payload.toString("utf8"));
-    } catch {
-      result.json = null;
-    }
+    result.json = JSON.parse(result.payload.toString("utf8"));
   }
 
   return result;

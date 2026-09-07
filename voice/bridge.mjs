@@ -8,6 +8,7 @@
 import { WebSocketServer } from "ws";
 import { AsrSession } from "./asr.mjs";
 import { TtsSession } from "./tts.mjs";
+import gatewayModule from "../gateway-access.cjs";
 
 const ASR_SAMPLE_RATE = 16000;
 const TTS_SAMPLE_RATE = 24000;
@@ -32,13 +33,30 @@ function credentials(env) {
 }
 
 class VoiceConnection {
-  constructor(socket, env) {
+  constructor(socket, env, access) {
     this.socket = socket;
     this.env = env;
     this.asr = null;
     this.tts = null;
     this.ttsGeneration = 0;
     this.closed = false;
+    this.access = access;
+    this.principal = null;
+    this.authenticating = false;
+    this.releaseAccess = null;
+    this.asrRequest = 0;
+    this.ttsRequest = 0;
+    this.ttsRequestId = undefined;
+    this.ttsCharacters = 0;
+    this.audioBytes = 0;
+    this.lastActivity = Date.now();
+    const authTimeout = gatewayModule.boundedNumber(env.FENGHAO_VOICE_AUTH_TIMEOUT_MS, 5000, 100, 30000);
+    this.authTimer = setTimeout(() => this.rejectAccess(new Error('设备认证超时，请重新连接。')), authTimeout);
+    this.authTimer.unref();
+    this.idleTimer = setInterval(() => {
+      if (Date.now() - this.lastActivity > 90000) this.rejectAccess(new Error('语音连接已空闲，请重新开始聆听。'));
+    }, 30000);
+    this.idleTimer.unref();
   }
 
   sendJson(payload) {
@@ -49,35 +67,43 @@ class VoiceConnection {
 
   sendBinary(chunk) {
     if (this.socket.readyState === this.socket.OPEN) {
+      if (this.socket.bufferedAmount > 1024 * 1024) {
+        this.rejectAccess(new Error('语音接收速度过慢，请重新连接。'));
+        return;
+      }
       this.socket.send(chunk, { binary: true });
     }
   }
 
-  fail(scope, error) {
+  fail(scope, error, requestId) {
     this.sendJson({
       type: "error",
       scope,
-      message: error && error.message || "语音服务出现未知错误。"
+      message: error && error.message || "语音服务出现未知错误。",
+      retryable: scope === 'asr' || scope === 'tts',
+      requestId,
     });
   }
 
   async startAsr() {
     this.stopAsr();
+    this.audioBytes = 0;
     const session = new AsrSession({
       ...credentials(this.env),
       resourceId: this.env.VOLC_ASR_RESOURCE_ID || "volc.bigasr.sauc.duration",
       endpoint: this.env.VOLC_ASR_ENDPOINT,
       sampleRate: ASR_SAMPLE_RATE,
-      onPartial: (text) => this.sendJson({ type: "asr_partial", text }),
+      onPartial: (text) => { if (this.asr === session && !this.closed) this.sendJson({ type: "asr_partial", text }); },
       onFinal: (text) => {
-        this.sendJson({ type: "asr_final", text });
-        if (this.asr === session) {
+        if (this.asr === session && !this.closed) {
+          this.sendJson({ type: "asr_final", text });
           this.asr = null;
         }
       },
       onError: (error) => {
-        this.fail("asr", error);
-        if (this.asr === session) {
+        if (this.asr === session && !this.closed) {
+          this.fail("asr", error);
+          session.close();
           this.asr = null;
         }
       }
@@ -89,8 +115,9 @@ class VoiceConnection {
         this.sendJson({ type: "asr_ready" });
       }
     } catch (error) {
-      if (!session.closed && this.asr === session) {
+      if (!this.closed && this.asr === session) {
         this.fail("asr", error);
+        session.close();
       }
       if (this.asr === session) {
         this.asr = null;
@@ -105,10 +132,11 @@ class VoiceConnection {
     }
   }
 
-  async startTts(speedRatio) {
+  async startTts(speedRatio, requestId) {
     this.cancelTts();
     this.ttsGeneration += 1;
     const generation = this.ttsGeneration;
+    this.ttsCharacters = 0;
     const session = new TtsSession({
       ...credentials(this.env),
       cluster: this.env.VOLC_TTS_CLUSTER || "volcano_tts",
@@ -125,13 +153,13 @@ class VoiceConnection {
       },
       onFinish: () => {
         if (generation === this.ttsGeneration) {
-          this.sendJson({ type: "tts_end" });
+          this.sendJson({ type: "tts_end", requestId });
         }
       },
       onError: (error) => {
         if (generation === this.ttsGeneration) {
-          this.fail("tts", error);
-          this.sendJson({ type: "tts_end" });
+          this.fail("tts", error, requestId);
+          if (this.tts === session) this.tts = null;
         }
       }
     });
@@ -139,12 +167,12 @@ class VoiceConnection {
     try {
       await session.open();
       if (generation === this.ttsGeneration && !session.closed) {
-        this.sendJson({ type: "tts_begin", sampleRate: TTS_SAMPLE_RATE });
+        this.sendJson({ type: "tts_begin", sampleRate: TTS_SAMPLE_RATE, requestId });
       }
     } catch (error) {
       if (generation === this.ttsGeneration && !session.closed) {
-        this.fail("tts", error);
-        this.sendJson({ type: "tts_end" });
+        this.fail("tts", error, requestId);
+        session.close();
       }
       if (this.tts === session) {
         this.tts = null;
@@ -160,29 +188,65 @@ class VoiceConnection {
     }
   }
 
-  handleControl(raw) {
+  rejectAccess(error) {
+    if (this.closed) return;
+    this.sendJson({ type: 'error', scope: 'auth', code: error.code || 'voice_access_denied',
+      message: error.message || '语音访问不可用。', retryable: false });
+    this.dispose();
+    this.socket.close(1008, 'voice access denied');
+  }
+
+  async authenticate(message) {
+    if (this.principal || this.authenticating) throw new Error('设备认证状态无效。');
+    this.authenticating = true;
+    const principal = await this.access.authenticate(message.deviceId, message.deviceToken);
+    if (this.closed) return;
+    this.releaseAccess = this.access.acquire('voice', principal.deviceId, 2);
+    this.principal = principal;
+    clearTimeout(this.authTimer);
+    this.sendJson({ type: 'authenticated', asrSampleRate: ASR_SAMPLE_RATE, ttsSampleRate: TTS_SAMPLE_RATE });
+  }
+
+  async handleControl(raw) {
     let message;
     try {
       message = JSON.parse(raw);
     } catch {
+      throw new Error('语音控制消息必须是有效 JSON。');
+    }
+    if (!message || typeof message.type !== 'string') throw new Error('语音控制消息无效。');
+    this.lastActivity = Date.now();
+    if (message.type === 'authenticate') { await this.authenticate(message); return; }
+    if (!this.principal) throw new Error('请先认证设备，再使用语音服务。');
+    if (message.type === 'asr_start' || message.type === 'tts_start') {
+      if (message.type === 'tts_start') {
+        if (message.requestId !== undefined && (typeof message.requestId !== 'string' || message.requestId.length > 80)) {
+          throw new Error('语音合成请求标识无效。');
+        }
+        this.ttsRequestId = message.requestId;
+      }
+      const counter = message.type === 'asr_start' ? 'asrRequest' : 'ttsRequest';
+      const generation = ++this[counter];
+      await this.access.authenticate(this.principal.deviceId, this.principal.deviceToken);
+      if (this.closed || this[counter] !== generation) return;
+      this.access.checkStartRate(message.type, this.principal.deviceId, 60);
+      if (message.type === 'asr_start') await this.startAsr();
+      else await this.startTts(message.speedRatio, message.requestId);
       return;
     }
     switch (message.type) {
-      case "asr_start":
-        this.startAsr();
-        break;
       case "asr_stop":
         if (this.asr) {
           this.asr.finish();
         }
         break;
       case "asr_abort":
+        this.asrRequest++;
         this.stopAsr();
         break;
-      case "tts_start":
-        this.startTts(message.speedRatio);
-        break;
       case "tts_text":
+        if (typeof message.text !== 'string' || message.text.length > 2000
+          || (this.ttsCharacters += message.text.length) > 12000) throw new Error('语音文本过长，请缩短问题。');
         if (this.tts) {
           this.tts.speak(message.text);
         }
@@ -193,8 +257,9 @@ class VoiceConnection {
         }
         break;
       case "tts_cancel":
+        this.ttsRequest++;
         this.cancelTts();
-        this.sendJson({ type: "tts_end" });
+        this.sendJson({ type: "tts_end", requestId: this.ttsRequestId });
         break;
       default:
         break;
@@ -202,17 +267,22 @@ class VoiceConnection {
   }
 
   dispose() {
+    if (this.closed) return;
     this.closed = true;
+    clearTimeout(this.authTimer);
+    clearInterval(this.idleTimer);
+    if (this.releaseAccess) this.releaseAccess();
+    this.principal = null;
     this.stopAsr();
     this.cancelTts();
   }
 }
 
-export function attachVoiceBridge(server, env) {
-  const wss = new WebSocketServer({ noServer: true });
+export function attachVoiceBridge(server, env, access) {
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 65536 });
 
   wss.on("connection", (socket) => {
-    const connection = new VoiceConnection(socket, env);
+    const connection = new VoiceConnection(socket, env, access);
     connection.sendJson({
       type: "hello",
       asrSampleRate: ASR_SAMPLE_RATE,
@@ -221,13 +291,21 @@ export function attachVoiceBridge(server, env) {
     });
 
     socket.on("message", (data, isBinary) => {
+      if (connection.closed) return;
       if (isBinary) {
+        if (!connection.principal) { connection.rejectAccess(new Error('请先认证设备。')); return; }
+        connection.lastActivity = Date.now();
+        connection.audioBytes += data.length;
+        if (connection.audioBytes > ASR_SAMPLE_RATE * 2 * 120) {
+          connection.rejectAccess(new Error('单次语音过长，请分段提问。')); return;
+        }
         if (connection.asr) {
-          connection.asr.sendAudio(data);
+          try { connection.asr.sendAudio(data); }
+          catch (error) { connection.fail('asr', error); connection.stopAsr(); }
         }
         return;
       }
-      connection.handleControl(data.toString("utf8"));
+      connection.handleControl(data.toString("utf8")).catch(error => connection.rejectAccess(error));
     });
 
     socket.on("close", () => connection.dispose());
@@ -240,6 +318,9 @@ export function attachVoiceBridge(server, env) {
       socket.destroy();
       return;
     }
+    try { access.checkOrigin(request, true); }
+    catch { socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return; }
+    if (wss.clients.size >= 128) { socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n'); return; }
     if (!speechConfigured(env)) {
       socket.destroy();
       return;
@@ -248,6 +329,8 @@ export function attachVoiceBridge(server, env) {
       wss.emit("connection", client, request);
     });
   });
+
+  server.on('close', () => { for (const client of wss.clients) client.terminate(); wss.close(); });
 
   return wss;
 }

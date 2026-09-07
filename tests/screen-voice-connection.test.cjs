@@ -217,6 +217,7 @@ test("播报被打断时会缓存首段语音，待识别就绪后按顺序发�
   }
 
   const sandbox = {
+    setTimeout, clearTimeout,
     ArrayBuffer,
     AudioWorkletNode: MockAudioWorkletNode,
     Float32Array,
@@ -228,11 +229,13 @@ test("播报被打断时会缓存首段语音，待识别就绪后按顺序发�
   };
   vm.runInNewContext(source, sandbox);
   const voice = sandbox.window.createVoice({
+    deviceId: "D1", deviceToken: "synthetic-token",
     onError() {}, onFinalTranscript() {}, onPartialTranscript() {}, onStateChange() {}
   });
   const starting = voice.startListening();
   const socket = sockets[0];
   socket.open();
+  socket.message(JSON.stringify({ type: "authenticated" }));
   await starting;
   socket.message(JSON.stringify({ type: "asr_ready" }));
 
@@ -246,7 +249,9 @@ test("播报被打断时会缓存首段语音，待识别就绪后按顺序发�
   socket.message(JSON.stringify({ type: "asr_final", text: "上一轮问题" }));
   socket.sent.length = 0;
 
-  voice.beginSpeech();
+  await voice.beginSpeech();
+  const ttsStart = socket.sent.filter((item) => typeof item === "string").map((item) => JSON.parse(item)).find((item) => item.type === "tts_start");
+  socket.message(JSON.stringify({ type: "tts_begin", requestId: ttsStart.requestId, sampleRate: 24000 }));
   socket.message(new Int16Array([1, 2]).buffer);
   const firstUtterance = [0, 1, 2, 3].map(() => new Int16Array([17, 18]).buffer);
   firstUtterance.forEach((pcm) => worklet.port.onmessage({ data: { type: "audio", level: 0.2, pcm } }));

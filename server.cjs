@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const https = require("node:https");
 const path = require("node:path");
-const { Readable } = require("node:stream");
+const { createGatewayAccess, boundedNumber } = require("./gateway-access.cjs");
 
 const publicRoot = path.resolve(__dirname, "public");
 const assistantEnvFiles = [
@@ -19,6 +19,7 @@ const listenHost = process.env.FENGHAO_MANAGEMENT_HOST || "127.0.0.1";
 const apiBase = new URL(process.env.FENGHAO_API_BASE || "http://127.0.0.1:8080");
 if (!["http:", "https:"].includes(apiBase.protocol)) throw new Error("FENGHAO_API_BASE must use HTTP or HTTPS");
 const proxyClient = apiBase.protocol === "https:" ? https : http;
+const gatewayAccess = createGatewayAccess(apiBase);
 
 const assistantEndpoint = process.env.VOLC_AGENT_ENDPOINT || "https://open.feedcoopapi.com/agent_api/agent/chat/completion";
 const contentTypes = new Map([
@@ -87,9 +88,12 @@ function readAssistantJson(request) {
   return new Promise((resolve, reject) => {
     let received = 0;
     const chunks = [];
+    let rejected = false;
     request.on("data", (chunk) => {
+      if (rejected) return;
       received += chunk.length;
       if (received > assistantMaxBodyBytes) {
+        rejected = true;
         reject(new Error("请求内容过大。"));
         request.resume();
         return;
@@ -97,6 +101,7 @@ function readAssistantJson(request) {
       chunks.push(chunk);
     });
     request.on("end", () => {
+      if (rejected) return;
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
       } catch (_) {
@@ -104,6 +109,7 @@ function readAssistantJson(request) {
       }
     });
     request.on("error", reject);
+    request.on("aborted", () => reject(new Error("请求已取消。")));
   });
 }
 
@@ -114,10 +120,11 @@ function normaliseAssistantMessages(input) {
     .map((message) => ({ role: message.role, content: message.content.trim() }))
     .filter((message) => message.content);
   if (!messages.length) throw new Error("messages 中缺少可用内容。");
+  if (messages.some(message => message.content.length > 8000)) throw new Error("单条问题或历史回答过长。");
   return [{ role: "system", content: assistantSystemPrompt }, ...messages.slice(-9)];
 }
 
-async function proxyAssistantChat(request, response) {
+async function proxyAssistantChat(request, response, principal) {
   if (!assistantConfigured()) {
     sendAssistantJson(response, 503, {
       error: {
@@ -131,6 +138,9 @@ async function proxyAssistantChat(request, response) {
   let body;
   let messages;
   try {
+    if (!/^application\/json(?:;|$)/i.test(String(request.headers['content-type'] || ''))) {
+      throw new Error("请求必须使用 application/json。");
+    }
     body = await readAssistantJson(request);
     messages = normaliseAssistantMessages(body.messages);
   } catch (error) {
@@ -138,9 +148,16 @@ async function proxyAssistantChat(request, response) {
     return;
   }
 
+  if (request.aborted || response.destroyed) return;
+  const release = gatewayAccess.acquire('chat', principal.deviceId);
+  try { gatewayAccess.checkStartRate('chat', principal.deviceId); }
+  catch (error) { release(); throw error; }
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 120000);
-  let upstream;
+  const lifetime = boundedNumber(process.env.FENGHAO_ASSISTANT_TIMEOUT_MS, 120000, 100, 300000);
+  const timeout = setTimeout(() => controller.abort(), lifetime);
+  const cancel = () => controller.abort();
+  response.on('close', cancel);
+  request.on('aborted', cancel);
   try {
     const extensionOptions = {
       enable_processing_state: true,
@@ -149,7 +166,7 @@ async function proxyAssistantChat(request, response) {
     };
     const browsingMode = Number(process.env.VOLC_BROWSING_MODE);
     if (Number.isFinite(browsingMode)) extensionOptions.browsing_mode = browsingMode;
-    upstream = await fetch(assistantEndpoint, {
+    const upstream = await fetch(assistantEndpoint, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${process.env.VOLC_API_KEY}`,
@@ -165,36 +182,41 @@ async function proxyAssistantChat(request, response) {
       }),
       signal: controller.signal,
     });
-  } catch (error) {
-    const message = error.name === "AbortError" ? "智能体服务响应超时。" : "无法连接智能体服务。";
-    sendAssistantJson(response, 502, { error: { code: "agent_unavailable", message } });
-    return;
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  if (!upstream.ok) {
-    sendAssistantJson(response, 502, {
-      error: {
-        code: "agent_upstream_error",
-        message: "智能体服务返回异常，请检查本地 BOT_ID、API Key 与权限配置。",
-        upstream_status: upstream.status,
-      },
+    if (!upstream.ok) {
+      await upstream.body?.cancel();
+      sendAssistantJson(response, 502, { error: {
+        code: "agent_upstream_error", message: "智能体服务返回异常，请检查服务端配置与权限。", upstream_status: upstream.status,
+      } });
+      return;
+    }
+    response.writeHead(upstream.status, {
+      "Content-Type": upstream.headers.get("content-type") || "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform", Connection: "keep-alive", "X-Accel-Buffering": "no",
     });
-    return;
-  }
-
-  response.writeHead(upstream.status, {
-    "Content-Type": upstream.headers.get("content-type") || "text/event-stream; charset=utf-8",
-    "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
-    "X-Accel-Buffering": "no",
-  });
-  if (!upstream.body) {
+    response.flushHeaders();
+    if (upstream.body) for await (const chunk of upstream.body) {
+      if (controller.signal.aborted || response.destroyed) break;
+      if (!response.write(chunk)) {
+        await new Promise(resolve => {
+          const ready = () => {
+            response.off('drain', ready); response.off('close', ready);
+            controller.signal.removeEventListener('abort', ready); resolve();
+          };
+          response.once('drain', ready); response.once('close', ready);
+          controller.signal.addEventListener('abort', ready, { once: true });
+          if (controller.signal.aborted) ready();
+        });
+      }
+    }
     response.end();
-    return;
+  } catch (error) {
+    if (response.destroyed) return;
+    const message = controller.signal.aborted ? "智能体服务响应超时，请重试。" : "无法连接智能体服务。";
+    if (!response.headersSent) sendAssistantJson(response, 502, { error: { code: "agent_unavailable", message } });
+    else response.destroy();
+  } finally {
+    clearTimeout(timeout); response.off('close', cancel); request.off('aborted', cancel); release();
   }
-  Readable.fromWeb(upstream.body).on("error", () => response.end()).pipe(response);
 }
 
 function proxy(request, response) {
@@ -265,12 +287,14 @@ function staticFile(request, response) {
 }
 
 const server = http.createServer(async (request, response) => {
+  try {
   const requestUrl = new URL(request.url, "http://localhost");
   const pathname = requestUrl.pathname;
   if (request.method === "GET" && pathname === "/api/v1/assistant/status") {
+    await gatewayAccess.authenticateRequest(request);
     sendAssistantJson(response, 200, {
       configured: assistantConfigured(),
-      mode: assistantConfigured() ? "volcengine" : "demo",
+      mode: assistantConfigured() ? "volcengine" : "unconfigured",
       agent: "networked-qa",
       speech: speechConfigured(),
       speaker: process.env.VOLC_TTS_SPEAKER || "ICL_uranus_zh_female_chengshujiejie_tob",
@@ -278,7 +302,9 @@ const server = http.createServer(async (request, response) => {
     return;
   }
   if (request.method === "POST" && pathname === "/api/v1/assistant/chat") {
-    await proxyAssistantChat(request, response);
+    const principal = await gatewayAccess.authenticateRequest(request);
+    if (request.aborted || response.destroyed) return;
+    await proxyAssistantChat(request, response, principal);
     return;
   }
   if (pathname.startsWith("/api/v1/") || pathname.startsWith("/files/")) {
@@ -286,12 +312,20 @@ const server = http.createServer(async (request, response) => {
     return;
   }
   staticFile(request, response);
+  } catch (error) {
+    if (response.destroyed) return;
+    if (response.headersSent) { response.destroy(); return; }
+    sendAssistantJson(response, error.status || 500, { error: {
+      code: error.code || 'gateway_error', message: error.status ? error.message : '大屏服务暂不可用，请稍后重试。', retryable: false,
+    } });
+  }
 });
+server.requestTimeout = 30000;
 
 async function startServer() {
   try {
     const { attachVoiceBridge } = await import("./voice/bridge.mjs");
-    attachVoiceBridge(server, process.env);
+    attachVoiceBridge(server, process.env, gatewayAccess);
   } catch (error) {
     console.error(`安全问答语音模块加载失败：${error.message}`);
     process.exitCode = 1;

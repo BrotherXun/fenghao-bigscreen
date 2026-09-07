@@ -3,9 +3,24 @@ const { createApp } = Vue;
 createApp({
   data() {
     const params = new URLSearchParams(location.search);
+    let deviceId = params.get("deviceId") || "";
+    let deviceToken = params.get("deviceToken") || "";
+    try {
+      deviceId ||= localStorage.getItem("fenghao-screen-device-id") || "";
+      if (deviceId) deviceToken ||= localStorage.getItem("fenghao-screen-device-token:" + deviceId) || "";
+      if (deviceId && deviceToken) {
+        localStorage.setItem("fenghao-screen-device-id", deviceId);
+        localStorage.setItem("fenghao-screen-device-token:" + deviceId, deviceToken);
+      }
+      localStorage.removeItem?.("fenghao-screen-device-token");
+    } catch (_) { /* 禁用持久存储时仍可使用本次内存配置。 */ }
+    if (params.has("deviceToken") && typeof history !== "undefined") {
+      params.delete("deviceToken");
+      history.replaceState(null, "", (location.pathname || "/screen.html") + (params.size ? "?" + params : "") + (location.hash || ""));
+    }
     return {
-      deviceId: params.get("deviceId") || "SCR-001",
-      deviceToken: params.get("deviceToken") || localStorage.getItem("fenghao-screen-device-token") || "SCR-DEMO-TOKEN",
+      deviceId,
+      deviceToken,
       device: {},
       session: {},
       videos: [],
@@ -15,10 +30,15 @@ createApp({
       error: "",
       message: "",
       pollTimer: null,
+      deviceTimer: null,
+      commandBusy: false,
       sessionEpoch: 0,
+      playbackStates: {},
       assistantOpen: true,
       assistantViewMode: "voice",
       assistantBusy: false,
+      assistantRequestId: 0,
+      assistantAbort: null,
       assistantInput: "",
       assistantConnection: "正在检查问答服务…",
       assistantConnectionMode: "checking",
@@ -188,29 +208,91 @@ createApp({
   },
   async mounted() {
     this.bindAdminVideoFullscreenEvents();
+    this.startDevicePolling();
     await Promise.all([this.init(), this.openAssistant()]);
   },
   beforeUnmount() {
     this.sessionEpoch += 1;
     this.stopPolling();
+    if (this.deviceTimer) clearInterval(this.deviceTimer);
     this.stopAssistantVoice();
+    this.cancelAssistantRequest();
     this.exitAdminVideoFullscreen();
     this.unbindAdminVideoFullscreenEvents();
     this.pauseAdminVideo();
   },
   methods: {
+    deviceHeaders() {
+      return { "X-Screen-Device-ID": this.deviceId, "X-Screen-Device-Token": this.deviceToken };
+    },
+    startDevicePolling() {
+      if (this.deviceTimer) clearInterval(this.deviceTimer);
+      this.deviceTimer = setInterval(this.pollDeviceCommands, 5000);
+    },
+    applyPlayback() {
+      const video = this.$refs.learningVideo;
+      if (!video) return;
+      const config = this.device.playback || {};
+      const volume = Number(config.volume);
+      if (config.volume != null && Number.isFinite(volume)) video.volume = Math.max(0, Math.min(1, volume / 100));
+      video.autoplay = config.autoPlay !== false;
+    },
+    async pollDeviceCommands() {
+      if (this.commandBusy || !this.deviceId || !this.deviceToken) return;
+      this.commandBusy = true;
+      try {
+        this.device = await FenghaoApi.screenConfig(this.deviceId, this.deviceToken);
+        this.applyPlayback();
+        if (!this.busy && this.session.sessionId && Object.prototype.hasOwnProperty.call(this.device, "currentSessionId")
+          && this.device.currentSessionId === null) {
+          this.$refs.learningVideo?.pause();
+          await this.createSession();
+        }
+        const commands = await FenghaoApi.screenDeviceCommands(this.deviceId, this.deviceToken);
+        for (const command of commands) {
+          let result = { status: "FAILED", detail: "浏览器终端不支持操作系统重启" };
+          if (command.action === "RECONNECT") {
+            try {
+              if (this.busy) throw new Error("当前学习请求尚未结束，请稍后重连。");
+              this.sessionEpoch += 1;
+              const sessionId = this.device.currentSessionId || this.session.sessionId;
+              if (sessionId) {
+                const data = await FenghaoApi.screenSession(sessionId, this.deviceToken);
+                if (data?.sessionId !== sessionId) throw new Error("会话响应不匹配。");
+                this.session = data;
+                this.videos = data.videos || [];
+                this.currentIndex = 0;
+                this.stage = data.status === "worker_identified" ? "identified"
+                  : ["checked_in", "playing", "learning_completed"].includes(data.status) ? "playing" : "waiting";
+                if (data.status === "learning_completed") await this.finishAll();
+                this.startPolling();
+              } else await this.createSession();
+              result = { status: "SUCCESS", detail: "设备配置和当前会话已重新同步" };
+            } catch (error) { result = { status: "FAILED", detail: error.message || "设备重连失败" }; }
+          } else if (command.action !== "RESTART") result.detail = "浏览器终端不支持此设备指令";
+          await FenghaoApi.ackScreenDeviceCommand(this.deviceId, command.id, this.deviceToken, result);
+        }
+      } catch (error) {
+        this.error = error.message || "设备同步失败，请检查网络或设备配置。";
+        if ([401, 403].includes(error.status)) {
+          this.$refs.learningVideo?.pause();
+          this.stopAssistantVoice();
+        }
+      } finally { this.commandBusy = false; }
+    },
     learningContext() {
-      return { epoch: this.sessionEpoch, sessionId: this.session.sessionId, deviceToken: this.deviceToken };
+      return { epoch: this.sessionEpoch, sessionId: this.session.sessionId, assignmentId: this.session.assignmentId, deviceToken: this.deviceToken };
     },
     isCurrentLearningContext(context) {
       return context.epoch === this.sessionEpoch && context.sessionId === this.session.sessionId
+        && context.assignmentId === this.session.assignmentId
         && context.deviceToken === this.deviceToken;
     },
     async init() {
       this.stage = "boot";
       this.error = "";
       try {
-        localStorage.setItem("fenghao-screen-device-token", this.deviceToken);
+        if (!this.deviceId || !this.deviceToken) throw new Error("请由管理员配置设备编号与设备令牌后启动大屏。");
         this.device = await FenghaoApi.screenConfig(this.deviceId, this.deviceToken);
         await this.createSession();
       } catch (error) {
@@ -219,6 +301,7 @@ createApp({
     },
     async createSession() {
       const epoch = ++this.sessionEpoch;
+      this.playbackStates = {};
       this.stopPolling();
       this.busy = true;
       try {
@@ -298,53 +381,194 @@ createApp({
         if (this.isCurrentLearningContext(context)) this.busy = false;
       }
     },
-    async reportProgress(progress) {
-      if (!this.currentVideo || !this.session.sessionId || this.busy) return null;
+    learningPlaybackState(player = this.$refs.learningVideo) {
+      const videoId = player?.dataset?.videoId || this.currentVideo?.videoId;
+      const video = this.videos.find((item) => item.videoId === videoId);
+      if (!player || !this.safeAdminVideoUrl(video?.videoUrl)) throw new Error("当前课程没有可播放的视频，无法完成学习。");
+      if (!video.unitId || !this.session.assignmentId || !this.session.sessionId) throw new Error("当前课程缺少新版培训单元信息，请在管理后台检查培训发布。");
       const context = this.learningContext();
-      const video = this.currentVideo;
-      const videoId = video.videoId;
-      this.busy = true;
+      const key = `${context.epoch}:${context.sessionId}:${video.unitId}`;
+      if (!this.playbackStates[key]) this.playbackStates[key] = {
+        context, videoId, unitId: video.unitId, player, queue: Promise.resolve(), row: null,
+        initializing: null, sequence: 0, position: 0, pending: null, playing: false,
+        preparing: false, failed: false, completed: false, seeking: false, restoringPosition: false,
+        lastHeartbeatAt: 0, lastObservedPosition: 0,
+      };
+      return this.playbackStates[key];
+    },
+    async ensureLearningPlayback(state) {
+      if (state.row) return state.row;
+      if (state.initializing) return state.initializing;
+      state.initializing = (async () => {
+        const row = await FenghaoApi.startScreenPlayback(state.context.sessionId, state.unitId, state.context.deviceToken);
+        if (!this.isCurrentLearningContext(state.context)) return null;
+        if (!row?.playbackSessionId || row.assignmentId !== state.context.assignmentId
+          || row.unitId !== state.unitId || row.resourceId !== state.videoId) throw new Error("播放会话与当前培训视频不匹配。");
+        state.row = row;
+        state.sequence = Number(row.lastSequence) || 0;
+        state.position = Number(row.acceptedPositionMs) || 0;
+        return row;
+      })();
+      try { return await state.initializing; } finally { state.initializing = null; }
+    },
+    async postLearningPlayback(state) {
+      const event = state.pending;
+      const data = await FenghaoApi.screenPlaybackEvent(state.context.sessionId, state.unitId, state.context.deviceToken, event);
+      if (!this.isCurrentLearningContext(state.context)) return null;
+      state.sequence = event.sequence;
+      state.position = Number(data.acceptedPositionMs) || 0;
+      state.pending = null;
+      state.failed = false;
       this.error = "";
-      try {
-        const data = await FenghaoApi.screenProgress(context.sessionId, context.deviceToken, {
-          videoId,
-          progress,
-          currentTime: Math.round((video.durationSec || 0) * progress / 100),
-          duration: video.durationSec || 0,
-          status: progress >= 100 ? "finished" : "playing",
-        });
-        if (!this.isCurrentLearningContext(context)) return null;
-        if (data?.sessionId !== context.sessionId || data.videoId !== videoId) {
-          throw new Error("学习进度响应不匹配，请重试。");
-        }
-        const index = this.videos.findIndex((item) => item.videoId === videoId);
-        if (index < 0) return null;
-        this.videos[index] = Object.assign({}, this.videos[index], {
-          progress: data.progress,
-          status: data.status,
-        });
-        if (progress >= 100 && data.videoCompleted !== true) {
-          throw new Error("服务端尚未确认本段学习完成，请重试。");
-        }
-        if (data.allCompleted === true && !await this.finishAll(context)) return null;
-        return data;
-      } catch (error) {
-        if (this.isCurrentLearningContext(context)) this.error = error.message || "进度上报失败";
-        return null;
-      } finally {
-        if (this.isCurrentLearningContext(context)) this.busy = false;
+      const index = this.videos.findIndex((item) => item.videoId === state.videoId && item.unitId === state.unitId);
+      if (index < 0) return null;
+      state.completed = data.completionStatus === "COMPLETED";
+      this.videos[index] = { ...this.videos[index], progress: state.completed ? 100 : Number(data.coveragePercent) || 0, status: state.completed ? "finished" : "playing" };
+      this.session.gate = { ...(this.session.gate || {}), status: data.gateStatus, blockedReasonCode: data.blockedReasonCode };
+      if (event.type === "ENDED") {
+        state.playing = false;
+        if (!state.completed) this.error = "服务端尚未确认完整播放，请从未完成的位置继续学习后重试。";
+        else if (data.gateStatus === "EXAM_READY" || this.videos.filter((item) => item.mustComplete !== false).every((item) => item.status === "finished")) await this.finishAll(state.context);
+        else if (this.currentVideo?.videoId === state.videoId) this.nextVideo();
       }
+      return data;
+    },
+    playbackEventId() {
+      if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+      const bytes = crypto.getRandomValues(new Uint8Array(16));
+      bytes[6] = (bytes[6] & 15) | 64;
+      bytes[8] = (bytes[8] & 63) | 128;
+      const hex = Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("");
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    },
+    queueLearningPlayback(state, type, position, rate = 1) {
+      state.queue = state.queue.catch(() => null).then(async () => {
+        if (!this.isCurrentLearningContext(state.context)) return null;
+        try {
+          if (!await this.ensureLearningPlayback(state)) return null;
+          if (!state.pending) {
+            const to = Math.max(0, Math.min(Number(state.row.durationMs), Math.round(position)));
+            state.pending = {
+              eventId: this.playbackEventId(), playbackSessionId: state.row.playbackSessionId,
+              sequence: state.sequence + 1, type, fromPositionMs: type === "START" ? to : state.position,
+              toPositionMs: to, playbackRate: Number(rate) || 1, occurredAt: new Date().toISOString(),
+            };
+          }
+          return await this.postLearningPlayback(state);
+        } catch (error) {
+          if (this.isCurrentLearningContext(state.context)) {
+            state.failed = true;
+            this.error = error.message || "播放记录保存失败，请重试当前记录。";
+            state.player.pause();
+          }
+          return null;
+        }
+      });
+      return state.queue;
+    },
+    async onLearningPlay(event) {
+      const player = event?.currentTarget || this.$refs.learningVideo;
+      let state;
+      try {
+        state = this.learningPlaybackState(player);
+        if (state.playing || state.preparing || state.completed) return;
+        state.preparing = true;
+        player.pause();
+        if (!state.row) {
+          const row = await this.ensureLearningPlayback(state);
+          if (!row || !this.isCurrentLearningContext(state.context)) return;
+          if (Math.abs(player.currentTime * 1000 - state.position) > 1) {
+            state.restoringPosition = true;
+            player.currentTime = state.position / 1000;
+          }
+        }
+        if (state.pending && state.pending.type !== "START") {
+          if (!await this.queueLearningPlayback(state, "START", player.currentTime * 1000, player.playbackRate)
+            || state.completed || !this.isCurrentLearningContext(state.context)) return;
+        }
+        const accepted = await this.queueLearningPlayback(state, "START", player.currentTime * 1000, player.playbackRate);
+        if (!accepted || !this.isCurrentLearningContext(state.context)) return;
+        state.playing = true;
+        state.lastHeartbeatAt = Date.now();
+        state.lastObservedPosition = player.currentTime * 1000;
+        if (state.preparing) await player.play();
+      } catch (error) {
+        if (!state || this.isCurrentLearningContext(state.context)) this.error = error.message || "视频播放初始化失败，请重试。";
+        player?.pause();
+      } finally { if (state) state.preparing = false; }
+    },
+    onLearningMetadata() { this.applyPlayback(); },
+    async onLearningPause(event) {
+      try {
+        const state = this.learningPlaybackState(event?.currentTarget);
+        if (!state.row || !state.player.paused || state.player.ended || state.preparing || state.failed || state.completed || state.seeking || state.restoringPosition) return;
+        state.playing = false;
+        return await this.queueLearningPlayback(state, "PAUSE", state.player.currentTime * 1000, state.player.playbackRate);
+      } catch (error) { this.error = error.message; }
+    },
+    async onLearningTimeUpdate(event) {
+      try {
+        const state = this.learningPlaybackState(event?.currentTarget);
+        if (!state.playing || state.seeking || state.failed || state.completed || state.player.paused) return;
+        state.lastObservedPosition = state.player.currentTime * 1000;
+        if (Date.now() - state.lastHeartbeatAt < 5000) return;
+        state.lastHeartbeatAt = Date.now();
+        return await this.queueLearningPlayback(state, "HEARTBEAT", state.lastObservedPosition, state.player.playbackRate);
+      } catch (error) { this.error = error.message; }
+    },
+    async onLearningSeeking(event) {
+      try {
+        const state = this.learningPlaybackState(event?.currentTarget);
+        if (state.restoringPosition) return;
+        state.seeking = true;
+        if (state.row && !state.failed && !state.completed) await this.queueLearningPlayback(state, "PAUSE", state.lastObservedPosition, state.player.playbackRate);
+      } catch (error) { this.error = error.message; }
+    },
+    async onLearningSeeked(event) {
+      try {
+        const state = this.learningPlaybackState(event?.currentTarget);
+        if (state.restoringPosition) { state.restoringPosition = false; return; }
+        state.seeking = false;
+        state.lastObservedPosition = state.player.currentTime * 1000;
+        state.playing = false;
+        if (state.row && !state.completed && !state.player.paused) return await this.onLearningPlay({ currentTarget: state.player });
+      } catch (error) { this.error = error.message; }
+    },
+    async onLearningEnded(event) {
+      try {
+        const state = this.learningPlaybackState(event?.currentTarget);
+        if (!state.player.ended || !state.row) throw new Error("请实际完整播放视频后再检查完成结果。");
+        if (state.completed) return this.finishCurrentVideo();
+        return await this.queueLearningPlayback(state, "ENDED", state.player.currentTime * 1000, state.player.playbackRate);
+      } catch (error) { this.error = error.message; }
+    },
+    async reportProgress() {
+      try {
+        const state = this.learningPlaybackState();
+        if (!state.row) throw new Error("请先实际播放视频，再保存播放记录。");
+        return await this.queueLearningPlayback(state, "HEARTBEAT", state.player.currentTime * 1000, state.player.playbackRate);
+      } catch (error) { this.error = error.message; return null; }
     },
     async finishCurrentVideo() {
-      const context = this.learningContext();
-      const videoId = this.currentVideo?.videoId;
-      const data = await this.reportProgress(100);
-      if (data?.videoCompleted === true && this.isCurrentLearningContext(context)
-        && this.currentVideo?.videoId === videoId && this.stage === "playing") this.nextVideo();
+      try {
+        const state = this.learningPlaybackState();
+        if (state.completed) {
+          if (this.videos.filter((item) => item.mustComplete !== false).every((item) => item.status === "finished")) return await this.finishAll(state.context);
+          return this.nextVideo();
+        }
+        if (state.player.ended && state.row) return await this.onLearningEnded({ currentTarget: state.player });
+        if (state.row) await this.reportProgress();
+        this.error = "请实际完整播放视频后再检查完成结果。";
+      } catch (error) { this.error = error.message; }
+    },
+    selectLearningVideo(index) {
+      if (index === this.currentIndex) return;
+      this.$refs.learningVideo?.pause();
+      this.currentIndex = index;
     },
     nextVideo() {
       if (this.currentIndex < this.videos.length - 1) {
-        this.currentIndex += 1;
+        this.selectLearningVideo(this.currentIndex + 1);
       }
     },
     async finishAll(context = this.learningContext()) {
@@ -359,7 +583,8 @@ createApp({
         if (data.status !== "learning_completed" || data.allCompleted !== true) {
           throw new Error("服务端尚未确认全部视频完成，请重试。");
         }
-        if (data.examUnlocked !== true) {
+        if (data.examUnlocked !== true || (context.assignmentId
+          && (data.assignmentId !== context.assignmentId || data.gate?.status !== "EXAM_READY"))) {
           throw new Error("视频学习已完成，但手机端答题尚未解锁，请确认其他必学内容后重试。");
         }
         this.session = Object.assign({}, this.session, data);
@@ -377,6 +602,8 @@ createApp({
     async clearAndRestart() {
       if (!this.session.sessionId) return this.createSession();
       this.sessionEpoch += 1;
+      this.$refs.learningVideo?.pause();
+      this.playbackStates = {};
       const context = this.learningContext();
       this.stopPolling();
       this.busy = true;
@@ -468,6 +695,10 @@ createApp({
         });
         if (!data?.token || !this.isProjectAdminRole(data.role)) {
           throw new Error("该账号不是项目管理员，不能使用大屏视频查看。");
+        }
+        if (data.passwordChangeRequired === true) {
+          this.adminLoginForm.password = "";
+          throw new Error("请先在现有管理后台修改初始密码，再返回此处登录。");
         }
         this.adminSession = {
           token: data.token,
@@ -719,7 +950,17 @@ createApp({
     },
     closeAssistant() {
       this.assistantOpen = false;
+      this.cancelAssistantRequest();
       this.stopAssistantVoice();
+    },
+    cancelAssistantRequest() {
+      this.assistantRequestId += 1;
+      this.assistantAbort?.abort();
+      this.assistantAbort = null;
+      this.assistantBusy = false;
+      this.assistantSpeakingThisTurn = false;
+      this.assistantLiveStatus = "";
+      this.assistantMessages.forEach((message) => { message.processing = ""; });
     },
     resetAssistant() {
       this.assistantInput = "";
@@ -736,11 +977,11 @@ createApp({
     },
     async checkAssistantStatus() {
       try {
-        const response = await fetch("/api/v1/assistant/status", { cache: "no-store" });
+        const response = await fetch("/api/v1/assistant/status", { cache: "no-store", headers: this.deviceHeaders() });
         if (!response.ok) throw new Error("问答服务不可用");
         const status = await response.json();
         if (status.configured) {
-          this.assistantConnection = "联网问答已连接 · 流式回答";
+          this.assistantConnection = "联网问答已配置 · 待实际提问验证";
           this.assistantConnectionMode = "online";
         } else {
           this.assistantConnection = "本地演示 · 未配置联网密钥";
@@ -759,6 +1000,9 @@ createApp({
       if (!this.assistantVoice && typeof window.createVoice === "function") {
         const screen = this;
         this.assistantVoice = window.createVoice({
+          deviceId: this.deviceId,
+          deviceToken: this.deviceToken,
+          onInterrupt() { screen.cancelAssistantRequest(); },
           onStateChange(state) {
             screen.setAssistantVoiceState(state);
           },
@@ -835,7 +1079,7 @@ createApp({
       }
     },
     stopAssistantVoice() {
-      if (this.assistantVoice?.isListening?.()) this.assistantVoice.stopListening();
+      this.assistantVoice?.stopListening?.();
       this.assistantVoiceListening = false;
       this.assistantVoiceState = "idle";
       this.assistantVoiceStatus = "语音已关闭";
@@ -852,7 +1096,11 @@ createApp({
     },
     async sendAssistantQuestion() {
       const question = this.assistantInput.trim();
-      if (!question || this.assistantBusy) return;
+      if (!question) return;
+      if (this.assistantBusy) this.cancelAssistantRequest();
+      const requestId = ++this.assistantRequestId;
+      const controller = new AbortController();
+      this.assistantAbort = controller;
       const userMessage = { role: "user", content: question, references: [], followUps: [] };
       const assistantMessage = { role: "assistant", content: "", processing: "正在理解问题", references: [], followUps: [] };
       this.assistantMessages.push(userMessage, assistantMessage);
@@ -862,36 +1110,44 @@ createApp({
       this.assistantBusy = true;
       this.scrollAssistantToLatest();
       this.assistantSpeakingThisTurn = Boolean(this.assistantVoice && this.assistantSpeechEnabled && this.assistantSpeakReplies);
-      if (this.assistantSpeakingThisTurn) {
-        this.assistantVoice.preparePlayback?.();
-        this.assistantVoice.beginSpeech(this.assistantSpeechRate);
-      }
       try {
+        if (this.assistantSpeakingThisTurn) {
+          this.assistantVoice.preparePlayback?.();
+          const speaking = await this.assistantVoice.beginSpeech(this.assistantSpeechRate);
+          if (requestId !== this.assistantRequestId) return;
+          if (speaking === false) this.assistantSpeakingThisTurn = false;
+        }
         const messages = this.assistantMessages
           .filter((item) => !item.localOnly && (item.role === "user" || (item.role === "assistant" && item.content)))
           .slice(-10)
           .map((item) => ({ role: item.role, content: item.content }));
         const response = await fetch("/api/v1/assistant/chat", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...this.deviceHeaders() },
           body: JSON.stringify({ messages }),
+          signal: controller.signal,
         });
+        if (requestId !== this.assistantRequestId) return;
         if (!response.ok) {
           const payload = await response.json().catch(() => ({}));
           throw new Error(payload?.error?.message || "问答服务暂不可用，请稍后重试。");
         }
         const contentType = response.headers.get("content-type") || "";
         if (contentType.includes("text/event-stream")) {
-          await this.readAssistantStream(response, assistantMessage);
+          await this.readAssistantStream(response, assistantMessage, requestId);
         } else {
-          this.consumeAssistantFrame(assistantMessage, await response.json());
+          const frame = await response.json();
+          if (requestId !== this.assistantRequestId) return;
+          this.consumeAssistantFrame(assistantMessage, frame);
         }
+        if (requestId !== this.assistantRequestId) return;
         if (!assistantMessage.content) assistantMessage.content = "暂未收到有效回答，请稍后重试。";
         this.assistantLiveAnswer = assistantMessage.content;
         this.assistantLiveStatus = "";
         assistantMessage.processing = "";
         if (this.assistantSpeakingThisTurn) this.assistantVoice.endSpeech();
       } catch (error) {
+        if (requestId !== this.assistantRequestId) return;
         if (this.assistantSpeakingThisTurn) this.assistantVoice.cancelSpeech();
         assistantMessage.processing = "";
         assistantMessage.content = `抱歉，本次问答未能完成。**${error?.message || "服务暂不可用，请稍后重试。"}**`;
@@ -900,13 +1156,16 @@ createApp({
         this.assistantConnection = "服务暂不可用";
         this.assistantConnectionMode = "error";
       } finally {
-        this.assistantSpeakingThisTurn = false;
-        this.assistantBusy = false;
-        this.scrollAssistantToLatest();
-        this.$nextTick(() => this.$refs.assistantInput?.focus());
+        if (requestId === this.assistantRequestId) {
+          this.assistantAbort = null;
+          this.assistantSpeakingThisTurn = false;
+          this.assistantBusy = false;
+          this.scrollAssistantToLatest();
+          this.$nextTick(() => this.$refs.assistantInput?.focus());
+        }
       }
     },
-    async readAssistantStream(response, message) {
+    async readAssistantStream(response, message, requestId = this.assistantRequestId) {
       const reader = response.body?.getReader();
       if (!reader) throw new Error("未收到流式问答内容。");
       const decoder = new TextDecoder("utf-8");
@@ -914,6 +1173,10 @@ createApp({
       let done = false;
       while (!done) {
         const packet = await reader.read();
+        if (requestId !== this.assistantRequestId) {
+          await reader.cancel().catch(() => {});
+          return;
+        }
         done = packet.done;
         buffer += decoder.decode(packet.value || new Uint8Array(), { stream: !done });
         const blocks = buffer.split(/\r?\n\r?\n/);
