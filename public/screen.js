@@ -15,6 +15,7 @@ createApp({
       error: "",
       message: "",
       pollTimer: null,
+      sessionEpoch: 0,
       assistantOpen: true,
       assistantViewMode: "voice",
       assistantBusy: false,
@@ -190,6 +191,7 @@ createApp({
     await Promise.all([this.init(), this.openAssistant()]);
   },
   beforeUnmount() {
+    this.sessionEpoch += 1;
     this.stopPolling();
     this.stopAssistantVoice();
     this.exitAdminVideoFullscreen();
@@ -197,6 +199,13 @@ createApp({
     this.pauseAdminVideo();
   },
   methods: {
+    learningContext() {
+      return { epoch: this.sessionEpoch, sessionId: this.session.sessionId, deviceToken: this.deviceToken };
+    },
+    isCurrentLearningContext(context) {
+      return context.epoch === this.sessionEpoch && context.sessionId === this.session.sessionId
+        && context.deviceToken === this.deviceToken;
+    },
     async init() {
       this.stage = "boot";
       this.error = "";
@@ -209,16 +218,26 @@ createApp({
       }
     },
     async createSession() {
+      const epoch = ++this.sessionEpoch;
+      this.stopPolling();
       this.busy = true;
       try {
-        this.session = await FenghaoApi.createScreenSession(this.deviceId, this.deviceToken);
+        const data = await FenghaoApi.createScreenSession(this.deviceId, this.deviceToken);
+        if (epoch !== this.sessionEpoch) return;
+        this.session = data;
         this.videos = [];
         this.currentIndex = 0;
         this.stage = "waiting";
+        this.error = "";
         this.message = "请使用手机扫描二维码。";
         this.startPolling();
+      } catch (error) {
+        if (epoch === this.sessionEpoch) {
+          this.error = error.message || "创建学习会话失败，请重试。";
+          throw error;
+        }
       } finally {
-        this.busy = false;
+        if (epoch === this.sessionEpoch) this.busy = false;
       }
     },
     startPolling() {
@@ -231,9 +250,13 @@ createApp({
       this.pollTimer = null;
     },
     async pollSession() {
-      if (!this.session.sessionId || this.stage === "playing" || this.stage === "completed") return;
+      if (!this.session.sessionId || this.busy || this.stage === "playing" || this.stage === "completed") return;
+      const context = this.learningContext();
+      const stage = this.stage;
       try {
-        const data = await FenghaoApi.screenSession(this.session.sessionId, this.deviceToken);
+        const data = await FenghaoApi.screenSession(context.sessionId, context.deviceToken);
+        if (!this.isCurrentLearningContext(context) || this.busy || this.stage !== stage) return;
+        if (data?.sessionId !== context.sessionId) throw new Error("会话响应不匹配，请重试。");
         this.session = Object.assign({}, this.session, data);
         if (data.status === "worker_identified") {
           this.stage = "identified";
@@ -242,92 +265,138 @@ createApp({
           this.videos = data.videos || [];
           this.stage = "playing";
         } else if (data.status === "learning_completed") {
-          this.stage = "completed";
+          this.videos = data.videos || [];
+          this.stage = "playing";
+          await this.finishAll(context);
         } else if (data.status === "expired") {
           this.error = "二维码已过期，请重新生成。";
         } else if (data.status === "error") {
           this.error = data.errorMessage || "识别失败";
         }
       } catch (error) {
-        this.error = error.message || "会话轮询失败";
+        if (this.isCurrentLearningContext(context) && this.stage === stage) {
+          this.error = error.message || "会话轮询失败";
+        }
       }
     },
     async startLearning() {
-      if (!this.session.sessionId) return;
+      if (!this.session.sessionId || this.busy) return;
+      const context = this.learningContext();
       this.busy = true;
       this.error = "";
       try {
-        const data = await FenghaoApi.screenCheckin(this.session.sessionId, this.deviceToken);
+        const data = await FenghaoApi.screenCheckin(context.sessionId, context.deviceToken);
+        if (!this.isCurrentLearningContext(context)) return;
+        if (data?.sessionId !== context.sessionId) throw new Error("签到响应不匹配，请重试。");
         this.session = Object.assign({}, this.session, data, { status: data.status });
         this.videos = data.videos || [];
         this.stage = "playing";
         this.message = "已签到，开始播放个人学习内容。";
       } catch (error) {
-        this.error = error.message || "开始学习失败";
+        if (this.isCurrentLearningContext(context)) this.error = error.message || "开始学习失败";
       } finally {
-        this.busy = false;
+        if (this.isCurrentLearningContext(context)) this.busy = false;
       }
     },
     async reportProgress(progress) {
-      if (!this.currentVideo) return;
+      if (!this.currentVideo || !this.session.sessionId || this.busy) return null;
+      const context = this.learningContext();
+      const video = this.currentVideo;
+      const videoId = video.videoId;
       this.busy = true;
+      this.error = "";
       try {
-        const data = await FenghaoApi.screenProgress(this.session.sessionId, this.deviceToken, {
-          videoId: this.currentVideo.videoId,
+        const data = await FenghaoApi.screenProgress(context.sessionId, context.deviceToken, {
+          videoId,
           progress,
-          currentTime: Math.round((this.currentVideo.durationSec || 0) * progress / 100),
-          duration: this.currentVideo.durationSec || 0,
+          currentTime: Math.round((video.durationSec || 0) * progress / 100),
+          duration: video.durationSec || 0,
           status: progress >= 100 ? "finished" : "playing",
         });
-        this.videos[this.currentIndex] = Object.assign({}, this.currentVideo, {
+        if (!this.isCurrentLearningContext(context)) return null;
+        if (data?.sessionId !== context.sessionId || data.videoId !== videoId) {
+          throw new Error("学习进度响应不匹配，请重试。");
+        }
+        const index = this.videos.findIndex((item) => item.videoId === videoId);
+        if (index < 0) return null;
+        this.videos[index] = Object.assign({}, this.videos[index], {
           progress: data.progress,
           status: data.status,
         });
-        if (data.allCompleted) {
-          await this.finishAll();
+        if (progress >= 100 && data.videoCompleted !== true) {
+          throw new Error("服务端尚未确认本段学习完成，请重试。");
         }
+        if (data.allCompleted === true && !await this.finishAll(context)) return null;
+        return data;
       } catch (error) {
-        this.error = error.message || "进度上报失败";
+        if (this.isCurrentLearningContext(context)) this.error = error.message || "进度上报失败";
+        return null;
       } finally {
-        this.busy = false;
+        if (this.isCurrentLearningContext(context)) this.busy = false;
       }
     },
     async finishCurrentVideo() {
-      await this.reportProgress(100);
-      if (this.stage !== "completed") this.nextVideo();
+      const context = this.learningContext();
+      const videoId = this.currentVideo?.videoId;
+      const data = await this.reportProgress(100);
+      if (data?.videoCompleted === true && this.isCurrentLearningContext(context)
+        && this.currentVideo?.videoId === videoId && this.stage === "playing") this.nextVideo();
     },
     nextVideo() {
       if (this.currentIndex < this.videos.length - 1) {
         this.currentIndex += 1;
       }
     },
-    async finishAll() {
+    async finishAll(context = this.learningContext()) {
+      if (!context.sessionId || !this.isCurrentLearningContext(context)) return false;
+      const wasBusy = this.busy;
+      this.busy = true;
+      this.error = "";
       try {
-        await FenghaoApi.screenComplete(this.session.sessionId, this.deviceToken);
-      } catch (_) {
-        // 如果后端已在进度上报时标记完成,这里失败不影响完成页展示。
+        const data = await FenghaoApi.screenComplete(context.sessionId, context.deviceToken);
+        if (!this.isCurrentLearningContext(context)) return false;
+        if (data?.sessionId !== context.sessionId) throw new Error("学习完成响应不匹配，请重试。");
+        if (data.status !== "learning_completed" || data.allCompleted !== true) {
+          throw new Error("服务端尚未确认全部视频完成，请重试。");
+        }
+        if (data.examUnlocked !== true) {
+          throw new Error("视频学习已完成，但手机端答题尚未解锁，请确认其他必学内容后重试。");
+        }
+        this.session = Object.assign({}, this.session, data);
+        this.stage = "completed";
+        this.message = "学习完成，手机端答题入口已解锁。";
+        this.stopPolling();
+        return true;
+      } catch (error) {
+        if (this.isCurrentLearningContext(context)) this.error = error.message || "学习完成确认失败，请重试。";
+        return false;
+      } finally {
+        if (this.isCurrentLearningContext(context)) this.busy = wasBusy;
       }
-      this.stage = "completed";
-      this.message = "学习完成，手机端答题入口已解锁。";
-      this.stopPolling();
     },
     async clearAndRestart() {
       if (!this.session.sessionId) return this.createSession();
+      this.sessionEpoch += 1;
+      const context = this.learningContext();
+      this.stopPolling();
       this.busy = true;
+      this.error = "";
       try {
-        await FenghaoApi.screenClear(this.session.sessionId, this.deviceToken);
+        await FenghaoApi.screenClear(context.sessionId, context.deviceToken);
+        if (!this.isCurrentLearningContext(context)) return;
         await this.createSession();
       } catch (error) {
-        this.error = error.message || "清空会话失败";
+        // createSession 会更新 epoch；只在仍属于本次操作时显示错误。
+        if (this.isCurrentLearningContext(context)) this.error = error.message || "清空会话失败";
       } finally {
-        this.busy = false;
+        if (this.isCurrentLearningContext(context)) {
+          this.busy = false;
+          this.startPolling();
+        }
       }
     },
     async resetSession() {
-      if (this.session.sessionId) {
-        try { await FenghaoApi.screenClear(this.session.sessionId, this.deviceToken); } catch (_) {}
-      }
-      await this.createSession();
+      await this.clearAndRestart();
     },
     getScreenAdminApiBase() {
       const value = String(window.FenghaoApi?.apiBase || "").trim();

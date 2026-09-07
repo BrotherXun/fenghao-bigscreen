@@ -16,6 +16,32 @@ const TTS_ENDPOINT = "wss://openspeech.bytedance.com/api/v1/tts/ws_binary";
 const MESSAGE_TYPE_AUDIO = 0xb;
 const MESSAGE_TYPE_ERROR = 0xf;
 
+function decodeTtsFrame(data) {
+  const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
+  if (buffer.length < 4) throw new Error("帧头长度不足。");
+  const headerSize = (buffer[0] & 0x0f) * 4;
+  if (headerSize < 4 || headerSize > buffer.length) throw new Error("帧头长度无效。");
+  const messageType = buffer[1] >> 4;
+  const flags = buffer[1] & 0x0f;
+  const compression = buffer[2] & 0x0f;
+  if (messageType !== MESSAGE_TYPE_ERROR && (messageType !== MESSAGE_TYPE_AUDIO || flags === 0)) {
+    return null; // 无序列号的确认帧，无音频负载。
+  }
+  if (buffer.length - headerSize < 8) throw new Error("序列号或负载长度字段不完整。");
+  const value = messageType === MESSAGE_TYPE_ERROR
+    ? buffer.readUInt32BE(headerSize)
+    : buffer.readInt32BE(headerSize);
+  const size = buffer.readUInt32BE(headerSize + 4);
+  const offset = headerSize + 8;
+  if (size > buffer.length - offset) throw new Error("声明的负载长度超过实际数据。");
+  let body = buffer.subarray(offset, offset + size);
+  if (messageType === MESSAGE_TYPE_ERROR) {
+    if (compression === 1) body = gunzipSync(body);
+    return { error: new Error("语音合成服务报错（" + value + "）：" + body.toString("utf8").slice(0, 200)) };
+  }
+  return { sequence: value, body };
+}
+
 export class TtsSession {
   constructor(options) {
     this.options = options;
@@ -154,64 +180,49 @@ export class TtsSession {
 
     socket.on("message", (data) => this.handleAudio(socket, data));
     socket.on("error", (error) => {
-      if (this.closed || this.active !== socket) {
-        return;
-      }
-      this.onError(new Error("语音合成传输失败：" + (error && error.message || "未知错误")));
-      this.release(socket);
+      this.fail(socket, new Error("语音合成传输失败：" + (error && error.message || "未知错误")));
     });
-    socket.on("close", () => this.release(socket));
+    socket.on("close", () => {
+      this.fail(socket, new Error("语音合成连接已关闭，未收到完整音频。"));
+    });
 
     try {
       socket.send(this.buildRequest(text));
     } catch (error) {
-      this.onError(new Error("语音合成请求发送失败：" + error.message));
-      this.release(socket);
+      this.fail(socket, new Error("语音合成请求发送失败：" + error.message));
       return;
     }
     this.prefetch();
   }
 
   handleAudio(socket, data) {
-    const buffer = Buffer.isBuffer(data) ? data : Buffer.from(data);
-    if (buffer.length < 4) {
+    if (this.closed || this.active !== socket) return;
+    let frame;
+    try {
+      frame = decodeTtsFrame(data);
+    } catch (error) {
+      this.fail(socket, new Error("语音合成返回帧解析失败：" + error.message));
       return;
     }
-    const headerSize = (buffer[0] & 0x0f) * 4;
-    const messageType = buffer[1] >> 4;
-    const flags = buffer[1] & 0x0f;
-    const compression = buffer[2] & 0x0f;
-    let offset = headerSize;
-
-    if (messageType === MESSAGE_TYPE_ERROR) {
-      const code = buffer.readUInt32BE(offset);
-      offset += 4;
-      const size = buffer.readUInt32BE(offset);
-      offset += 4;
-      let body = buffer.subarray(offset, offset + size);
-      if (compression === 1) {
-        try { body = gunzipSync(body); } catch { /* 保持原样 */ }
-      }
-      this.onError(new Error("语音合成服务报错（" + code + "）：" + body.toString("utf8").slice(0, 200)));
-      this.release(socket);
+    if (!frame) return;
+    if (frame.error) {
+      this.fail(socket, frame.error);
       return;
     }
-
-    if (messageType !== MESSAGE_TYPE_AUDIO || flags === 0) {
-      return; // 无序列号的确认帧，无音频负载
-    }
-
-    const sequence = buffer.readInt32BE(offset);
-    offset += 4;
-    const size = buffer.readUInt32BE(offset);
-    offset += 4;
-    if (size) {
-      this.onAudio(buffer.subarray(offset, offset + size));
+    if (frame.body.length) {
+      this.onAudio(frame.body);
     }
     // 负序列号 = 本句最后一包
-    if (sequence < 0) {
+    if (frame.sequence < 0) {
       this.release(socket);
     }
+  }
+
+  fail(socket, error) {
+    if (this.closed || this.active !== socket) return;
+    // 失败终止整次合成；release 仅用于负序列号正常结束，避免错误后仍通知成功。
+    this.close();
+    this.onError(error);
   }
 
   release(socket) {
