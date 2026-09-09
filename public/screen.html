@@ -5,9 +5,30 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>丰浩大屏机 - 个人安全教育学习</title>
     <link rel="stylesheet" href="./screen.css?v=18" />
+    <style>
+      #screenApp[hidden], #screenStartup[hidden], #screenStartup [hidden] { display: none !important; }
+    </style>
   </head>
   <body>
-    <main id="screenApp" class="term">
+    <section id="screenStartup" class="term" role="status" aria-live="polite">
+      <div class="term-inner">
+        <div class="term-stage">
+          <section class="stage-center">
+            <div id="screenStartupSpinner" class="spinner"></div>
+            <h2 id="screenStartupTitle">正在初始化大屏机</h2>
+            <p id="screenStartupMessage" class="muted">正在加载页面，请稍候…</p>
+            <button id="screenStartupRetry" class="btn-primary" type="button" hidden>刷新重试</button>
+            <noscript>
+              <style>#screenStartupSpinner, #screenStartupTitle, #screenStartupMessage { display: none !important; }</style>
+              <h2>无法初始化大屏机</h2>
+              <p class="banner banner-error">JavaScript 已禁用，请启用 JavaScript 后刷新页面。</p>
+              <a class="btn-primary" href="">刷新页面</a>
+            </noscript>
+          </section>
+        </div>
+      </div>
+    </section>
+    <main id="screenApp" class="term" hidden>
       <div class="term-inner">
         <header class="term-top">
           <div class="brand">
@@ -158,10 +179,10 @@
                 <div class="assistant-signal-surface" aria-hidden="true">
                   <span class="assistant-mascot-wave wave-left"><i></i><i></i><i></i></span>
                   <div class="assistant-mascot-figure">
-                    <img class="assistant-mascot-pose assistant-mascot-pose-speaking" src="./assets/safety-assistant-woman-speaking-hd.png" width="1644" height="1800" alt="" decoding="async" />
-                    <img class="assistant-mascot-pose assistant-mascot-pose-thinking" src="./assets/safety-assistant-woman-thinking-hd.png" width="1644" height="1800" alt="" decoding="async" />
-                    <video ref="assistantSpeakingVideo" class="assistant-mascot-video" muted loop playsinline preload="metadata" poster="./assets/safety-assistant-woman-speaking-hd.png">
-                      <source src="./assets/safety-assistant-woman-speaking-loop.webm" type="video/webm" />
+                    <img class="assistant-mascot-pose assistant-mascot-pose-speaking" :src="'./assets/safety-assistant-woman-speaking-hd.png'" width="1644" height="1800" alt="" decoding="async" />
+                    <img class="assistant-mascot-pose assistant-mascot-pose-thinking" :src="'./assets/safety-assistant-woman-thinking-hd.png'" width="1644" height="1800" alt="" decoding="async" />
+                    <video ref="assistantSpeakingVideo" class="assistant-mascot-video" muted loop playsinline preload="metadata" :poster="'./assets/safety-assistant-woman-speaking-hd.png'">
+                      <source :src="'./assets/safety-assistant-woman-speaking-loop.webm'" type="video/webm" />
                     </video>
                   </div>
                   <span class="assistant-mascot-wave wave-right"><i></i><i></i><i></i></span>
@@ -365,9 +386,63 @@
       </transition>
     </main>
 
-    <script src="./vendor/vue.global.prod.js"></script>
-    <script src="./api.js?v=4"></script>
-    <script src="./screen-voice.js?v=3"></script>
-    <script src="./screen.js?v=12"></script>
+    <script id="screen-startup-guard">
+      (() => {
+        const app = document.getElementById("screenApp");
+        const fallback = document.getElementById("screenStartup");
+        const spinner = document.getElementById("screenStartupSpinner");
+        const title = document.getElementById("screenStartupTitle");
+        const message = document.getElementById("screenStartupMessage");
+        const retry = document.getElementById("screenStartupRetry");
+        const runtimeUrls = ["./vendor/vue.global.prod.js", "./api.js", "./screen-voice.js", "./screen.js"]
+          .map((path) => new URL(path, window.location.href).href);
+        let ready = false;
+        let failed = false;
+        function showFailure(text) {
+          if (ready) return;
+          spinner.hidden = true;
+          title.textContent = "大屏机页面未能加载";
+          message.textContent = text;
+          retry.hidden = false;
+        }
+        function onError(event) {
+          if (ready) return;
+          const target = event.target;
+          const resourceFailed = target?.tagName === "SCRIPT" && target.hasAttribute("data-screen-runtime");
+          let runtimeFailed = false;
+          if (event.filename) {
+            try {
+              const url = new URL(event.filename, window.location.href);
+              url.search = "";
+              url.hash = "";
+              runtimeFailed = runtimeUrls.includes(url.href);
+            } catch (_) { /* Ignore errors from unrelated resources. */ }
+          }
+          if (!resourceFailed && !runtimeFailed) return;
+          failed = true;
+          clearTimeout(timeout);
+          showFailure("页面加载失败，请检查网络后刷新重试。");
+        }
+        const timeout = setTimeout(() => showFailure("页面加载超时，请检查网络后刷新重试。"), 30000);
+        window.addEventListener("error", onError, true);
+        retry.addEventListener("click", () => window.location.reload());
+        window.FenghaoScreenStartup = {
+          canMount: () => !ready && !failed,
+          ready() {
+            if (ready || failed) return;
+            ready = true;
+            clearTimeout(timeout);
+            window.removeEventListener("error", onError, true);
+            message.textContent = "";
+            fallback.hidden = true;
+            app.hidden = false;
+          },
+        };
+      })();
+    </script>
+    <script data-screen-runtime src="./vendor/vue.global.prod.js"></script>
+    <script data-screen-runtime src="./api.js?v=4"></script>
+    <script data-screen-runtime src="./screen-voice.js?v=3"></script>
+    <script data-screen-runtime src="./screen.js?v=13"></script>
   </body>
 </html>

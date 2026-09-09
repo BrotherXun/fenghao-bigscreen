@@ -1,6 +1,6 @@
 const { createApp } = Vue;
 
-createApp({
+const screenApp = createApp({
   data() {
     const params = new URLSearchParams(location.search);
     let deviceId = params.get("deviceId") || "";
@@ -1260,4 +1260,8 @@ createApp({
       });
     },
   },
-}).mount("#screenApp");
+});
+if (window.FenghaoScreenStartup?.canMount() !== false) {
+  screenApp.mount("#screenApp");
+  window.FenghaoScreenStartup?.ready();
+}

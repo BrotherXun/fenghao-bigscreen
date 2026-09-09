@@ -132,7 +132,7 @@ test("语音模式使用戴安全帽的真人安全员，并用思考和讲解�
   assert.match(screenCss, /\.assistant-voice-actions\s*\{[^}]*justify-content:\s*center/);
   assert.doesNotMatch(screenCss, /assistant-signal-surface[^}]*translateX\(-5%\)/);
   assert.match(screenHtml, /screen\.css\?v=18/);
-  assert.match(screenHtml, /screen\.js\?v=12/);
+  assert.match(screenHtml, /screen\.js\?v=13/);
   assert.doesNotMatch(screenHtml, /assistant-voice-orb|assistant-signal-aura|assistant-signal-orbit|assistant-signal-points/);
   assert.doesNotMatch(screenCss, /assistant-orb-breathe|assistant-aura-pulse|assistant-orbit|assistant-point/);
   assert.equal(speakingCharacter.readUInt32BE(0), 0x89504e47);
