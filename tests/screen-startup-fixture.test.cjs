@@ -29,6 +29,13 @@ test("startup fixture serves original and current real runtime on loopback witho
   const delayed = await request("/new/delay/vendor/vue.global.prod.js");
   assert.ok(Date.now() - start >= 65, "delay fixture actually holds the runtime response");
   assert.deepEqual(Buffer.from(await delayed.arrayBuffer()), normalBytes);
+  const slowAbort = new AbortController();
+  const abortTimer = setTimeout(() => slowAbort.abort(), 60);
+  try {
+    await assert.rejects(fetch(origin + "/new/slow/vendor/vue.global.prod.js", { signal: slowAbort.signal }), { name: "AbortError" });
+  } finally { clearTimeout(abortTimer); }
+  assert.ok(events.some((entry) => entry.event === "request" && entry.path === "/new/slow/vendor/vue.global.prod.js"));
+  assert.equal(events.some((entry) => entry.event === "response" && entry.path === "/new/slow/vendor/vue.global.prod.js"), false);
   assert.equal((await request("/new/fail/vendor/vue.global.prod.js")).status, 503);
   assert.equal((await request("/new/normal/.env")).status, 404);
   assert.equal((await request("/api/v1/assistant/status")).status, 401);

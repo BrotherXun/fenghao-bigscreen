@@ -45,15 +45,15 @@ function createStartupFixture({ delayMs = 35000, log = () => {} } = {}) {
       return send(url.pathname === "/api/v1/assistant/status" ? 401 : 503,
         JSON.stringify({ success: false, message: "启动测试不连接后端或云服务。" }), "application/json");
     }
-    const match = url.pathname.match(/^\/(old|new)\/(normal|delay|fail)\/(.+)$/);
+    const match = url.pathname.match(/^\/(old|new)\/(normal|delay|slow|fail)\/(.+)$/);
     if (!match || !files.includes(match[3]) || req.method !== "GET") return send(404, "fixture path not found");
     const [, version, mode, file] = match;
     safePath = `/${version}/${mode}/${file}`;
     log({ timeMs: Date.now() - started, event: "request", path: safePath, method: req.method });
     if (file === "vendor/vue.global.prod.js" && mode === "fail") return send(503, "deliberate local Vue load failure");
     const respond = () => send(200, snapshots[version].get(file), types[path.extname(file)]);
-    if (file === "vendor/vue.global.prod.js" && mode === "delay") {
-      const timer = setTimeout(respond, delayMs);
+    if (file === "vendor/vue.global.prod.js" && (mode === "delay" || mode === "slow")) {
+      const timer = setTimeout(respond, mode === "slow" ? 60000 : delayMs);
       res.once("close", () => clearTimeout(timer));
     } else respond();
   });
@@ -65,7 +65,7 @@ if (require.main === module) {
   const server = createStartupFixture({ log: (event) => process.stdout.write(JSON.stringify(event) + "\n") });
   server.listen(4192, "127.0.0.1", () => {
     process.stdout.write("Startup fixture: http://127.0.0.1:4192/new/normal/screen.html\n");
-    process.stdout.write("Variants: old/new; modes: normal/delay (35s Vue)/fail (503 Vue). No backend/cloud.\n");
+    process.stdout.write("Variants: old/new; modes: normal/delay (35s Vue)/slow (60s Vue)/fail (503 Vue). No backend/cloud.\n");
   });
   const close = () => { server.closeAllConnections(); server.close(); };
   process.once("SIGINT", close);
