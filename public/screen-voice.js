@@ -48,6 +48,7 @@
     var connected = false;
     var connectionPromise = null;
     var connectionTimer = null;
+    var cancelConnect = null;
     var asrRetryTimer = null;
     var asrFailures = 0;
     var speechGeneration = 0;
@@ -87,8 +88,8 @@
       }
     }
 
-    function fail(scope, message) {
-      handlers.onError(scope, message);
+    function fail(scope, message, detail) {
+      handlers.onError(scope, message, detail);
     }
 
     function send(payload) {
@@ -353,7 +354,7 @@
       if (connected && socket && socket.readyState === WebSocket.OPEN) return Promise.resolve(true);
       if (connectionPromise) return connectionPromise;
       if (!handlers.deviceId || !handlers.deviceToken) {
-        fail("connection", "请先配置有效的设备编号和令牌。");
+        fail("connection", "请使用新的大屏访问 token 链接。");
         return Promise.resolve(false);
       }
       connectionPromise = new Promise(function (resolve) {
@@ -368,8 +369,10 @@
           if (connectionTimer) clearTimeout(connectionTimer);
           connectionTimer = null;
           connectionPromise = null;
+          cancelConnect = null;
           resolve(ok);
         }
+        cancelConnect = function () { finish(false); };
         connectionTimer = setTimeout(function () {
           if (socket !== next) return;
           connected = false;
@@ -411,7 +414,7 @@
             finish(true);
           } else if (connected) handleControl(message);
           else if (message.type === "error") {
-            fail("connection", message.message || "设备语音认证失败。");
+            fail(message.scope === "auth" ? "auth" : "connection", message.message || "语音会话认证失败。", message);
             finish(false);
             next.close();
           }
@@ -461,7 +464,7 @@
           break;
         case "error":
           if (message.scope === "tts" && message.requestId !== ttsRequestId) break;
-          fail(message.scope, message.message);
+          fail(message.scope, message.message, message);
           if (message.scope === "auth") { stopListening(); if (socket?.readyState === WebSocket.OPEN) socket.close(); }
           if (message.scope === "tts") { resetTtsBuffer(); awaitingTtsEnd = false; stopPlayback(); }
           if (message.scope === "asr") {
@@ -582,6 +585,15 @@
         continuous = Boolean(value);
       },
       connect: connect,
+      disconnect: function () {
+        stopListening();
+        var previous = socket;
+        socket = null;
+        connected = false;
+        if (cancelConnect) cancelConnect();
+        // 握手中的连接等 onopen 再关闭，避免浏览器提前 close 的异常。
+        if (previous && previous.readyState === WebSocket.OPEN) previous.close();
+      },
 
       startListening: async function () {
         if (listening) {

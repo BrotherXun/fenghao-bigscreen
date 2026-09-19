@@ -173,3 +173,84 @@ test("native ended前的pause不先关闭服务端播放状态", async () => {
   await h.screen.onLearningEnded(h.event);
   assert.deepEqual(h.calls.filter(x => x.body?.type).map(x => x.body.type), ["START", "ENDED"]);
 });
+
+function playbackRejection(status, code, message) {
+  return {
+    rawResponse: {
+      ok: false, status,
+      json: async () => ({ success: false, code, message }),
+    },
+  };
+}
+
+for (const previousType of ["PAUSE", "ENDED"]) {
+  test(`${previousType}后明确拒绝的HEARTBEAT不会阻断原播放按钮的START`, async () => {
+    let previous = null;
+    const h = screenFor(({ body }) => {
+      if (body.type === "HEARTBEAT" && ["PAUSE", "ENDED"].includes(previous)) {
+        return playbackRejection(409, "ERR_PLAYBACK_EVENT_INVALID", "请先发送 START 开始或恢复播放");
+      }
+      previous = body.type;
+      return result(body.toPositionMs, { coveragePercent: 0 });
+    });
+    await h.screen.onLearningPlay(h.event);
+    h.player.currentTime = previousType === "ENDED" ? 6 : 2;
+    h.player.paused = true;
+    h.player.ended = previousType === "ENDED";
+    if (h.player.ended) await h.screen.onLearningEnded(h.event);
+    else await h.screen.onLearningPause(h.event);
+
+    await h.screen.reportProgress();
+    assert.match(h.screen.error, /请先发送 START/);
+    const rejected = h.calls.at(-1).body;
+    assert.equal(rejected.type, "HEARTBEAT");
+
+    // Model the native play button: replay from the end or resume the paused position.
+    if (h.player.ended) h.player.currentTime = 0;
+    h.player.ended = false;
+    h.player.paused = false;
+    await h.screen.onLearningPlay(h.event);
+
+    const events = h.calls.filter(call => call.body?.type).map(call => call.body);
+    assert.deepEqual(events.map(event => event.type), ["START", previousType, "HEARTBEAT", "START"]);
+    assert.equal(events.at(-1).sequence, rejected.sequence);
+    assert.notEqual(events.at(-1).eventId, rejected.eventId);
+    assert.equal(h.player.paused, false);
+    assert.equal(h.screen.error, "");
+    assert.equal(h.screen.videos[0].progress, 0);
+    assert.equal(h.screen.stage, "playing");
+    assert.ok(h.calls.every(call => !call.url.endsWith("/complete")));
+  });
+}
+
+for (const [label, fail] of [
+  ["连接断开", () => { throw new Error("连接断开，提交结果未知"); }],
+  ["请求超时", () => { throw Object.assign(new Error("请求超时"), { name: "AbortError" }); }],
+  ["网关失败", () => playbackRejection(502, "ERR_PLAYBACK_EVENT_INVALID", "请先发送 START 开始或恢复播放")],
+  ["其他业务码", () => playbackRejection(409, "ERR_INTERNAL", "请先发送 START 开始或恢复播放")],
+  ["缺少业务码", () => playbackRejection(409, undefined, "请先发送 START 开始或恢复播放")],
+  ["其他播放错误", () => playbackRejection(409, "ERR_PLAYBACK_EVENT_INVALID", "播放事件 sequence 必须严格递增")],
+]) {
+  test(`${label}仍以原事件幂等重试，不丢弃不确定提交`, async () => {
+    let attempts = 0;
+    const h = screenFor(({ body }) => {
+      if (body.type === "HEARTBEAT" && ++attempts === 1) return fail();
+      return result(body.toPositionMs);
+    });
+    await h.screen.onLearningPlay(h.event);
+    h.player.currentTime = 2;
+    await h.screen.reportProgress();
+    const pending = h.screen.learningPlaybackState().pending;
+    assert.equal(pending.type, "HEARTBEAT");
+    assert.equal(h.player.paused, true);
+
+    await h.screen.reportProgress();
+    const events = h.calls.filter(call => call.body?.type).map(call => call.body);
+    assert.deepEqual(events.map(event => event.type), ["START", "HEARTBEAT", "HEARTBEAT"]);
+    assert.deepEqual(events[1], events[2]);
+    assert.equal(events[1].eventId, pending.eventId);
+    assert.equal(events[1].sequence, pending.sequence);
+    assert.equal(h.screen.learningPlaybackState().pending, null);
+    assert.equal(h.screen.error, "");
+  });
+}

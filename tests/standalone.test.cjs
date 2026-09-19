@@ -26,10 +26,11 @@ test("独立 API 使用设备令牌和同源请求，并传播后端鉴权错误
 });
 
 test("独立网关启动、首页、媒体类型、配置隔离和业务代理", async (t) => {
+  const config = { deviceId: "D1", accessSessionId: "A1", accessExpiresAt: new Date(Date.now() + 86400000).toISOString() };
   const backend = http.createServer((req, res) => {
     res.setHeader("Content-Type", "application/json");
     res.end(JSON.stringify({ path: req.url, token: req.headers["x-screen-device-token"],
-      success: true, data: { deviceId: "D1" } }));
+      success: true, data: config }));
   });
   backend.listen(0, "127.0.0.1");
   await once(backend, "listening");
@@ -72,5 +73,5 @@ test("独立网关启动、首页、媒体类型、配置隔离和业务代理",
   assert.equal(status.speech, false);
   const proxied = await (await fetch(origin + "/api/v1/screen-devices/D1/config", { headers: { "X-Screen-Device-Token": "test-token" } })).json();
   assert.deepEqual(proxied, { path: "/api/v1/screen-devices/D1/config", token: "test-token",
-    success: true, data: { deviceId: "D1" } });
+    success: true, data: config });
 });

@@ -10,14 +10,15 @@ function deferred() {
 
 function loadScreen(handleRequest = async () => ({}), config = {}) {
   let options;
-  const calls = [], intervals = new Map(), storage = new Map(config.storage || []), historyCalls = [];
+  const calls = [], intervals = new Map(), storage = new Map(config.storage || []), sessionStorage = config.sessionStorage || new Map(), historyCalls = [];
   const origin = "http://test.invalid";
   const sandbox = {
     URL, URLSearchParams, AbortController, TextDecoder, Uint8Array, Date,
     crypto: config.crypto || require("node:crypto").webcrypto,
-    location: { origin, pathname: "/screen.html", search: config.search || "", href: origin + "/screen.html" + (config.search || ""), hash: "" },
+    location: { origin, pathname: "/screen.html", search: config.search || "", href: origin + "/screen.html" + (config.search || ""), hash: config.hash || "" },
     history: { replaceState(_state, _unused, url) { historyCalls.push(url); } },
     localStorage: { getItem(key) { return storage.get(key) || null; }, setItem(key, value) { storage.set(key, String(value)); }, removeItem(key) { storage.delete(key); } },
+    sessionStorage: { getItem(key) { return sessionStorage.get(key) || null; }, setItem(key, value) { if (config.storageBlocked) throw new Error("Storage blocked"); sessionStorage.set(key, String(value)); }, removeItem(key) { sessionStorage.delete(key); } },
     setInterval(fn, delay) { const id = intervals.size + 1; intervals.set(id, { fn, delay }); return id; },
     clearInterval(id) { intervals.delete(id); }, setTimeout, clearTimeout,
     window: { createVoice: config.createVoice },
@@ -38,7 +39,7 @@ function loadScreen(handleRequest = async () => ({}), config = {}) {
   const screen = Object.assign(options.data(), { $refs: {}, $nextTick(fn) { return Promise.resolve().then(fn); } });
   for (const [name, method] of Object.entries(options.methods)) screen[name] = method.bind(screen);
   for (const [name, getter] of Object.entries(options.computed)) Object.defineProperty(screen, name, { get: () => getter.call(screen) });
-  return { screen, calls, intervals, storage, historyCalls, options, api: sandbox.FenghaoApi };
+  return { screen, calls, intervals, storage, sessionStorage, historyCalls, options, api: sandbox.FenghaoApi };
 }
 
 module.exports = { deferred, loadScreen };

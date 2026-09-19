@@ -13,6 +13,7 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 async function fixture(t, settings = {}) {
   const stats = { agent: 0, voice: 0, closed: 0, authorized: 0, voiceAttempts: 0 };
   let revoked = false;
+  let sessionExpiresAt;
   const backend = http.createServer((req, res) => {
     if (req.url === '/agent') {
       stats.agent++;
@@ -25,11 +26,13 @@ async function fixture(t, settings = {}) {
     const authorized = !revoked && req.url === '/api/v1/screen-devices/D1/config'
       && req.headers['x-screen-device-token'] === 'test-device-token';
     if (authorized) stats.authorized++;
+    if (authorized && !sessionExpiresAt) sessionExpiresAt = new Date(Date.now() + (settings.expiredConfig ? -1000 : (settings.expiryMs || 86400000))).toISOString();
     const respond = () => {
-      res.writeHead(authorized ? 200 : 401, { 'Content-Type': 'application/json' });
+      res.writeHead(authorized ? 200 : (settings.accessExpired ? 410 : 401), { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(authorized
-        ? { success: true, data: { deviceId: 'D1', status: 'ONLINE', projectId: 'P1' } }
-        : { success: false, message: '设备令牌无效' }));
+        ? { success: true, data: { deviceId: 'D1', status: 'ONLINE', projectId: 'P1',
+          ...(settings.legacy ? {} : { accessSessionId: 'A1', accessExpiresAt: sessionExpiresAt }) } }
+        : { success: false, code: settings.accessExpired ? 'ERR_SCREEN_ACCESS_EXPIRED' : 'ERR_SCREEN_ACCESS_INVALID', message: settings.accessExpired ? '会话已到期' : '设备令牌无效' }));
     };
     if (settings.delayStart && stats.authorized > 1) setTimeout(respond, 100); else respond();
   });
@@ -109,6 +112,85 @@ test('anonymous, wrong token and cross-origin requests cannot consume paid QA', 
   assert.equal((await f.chat({})).status, 401);
   assert.equal((await f.chat({ ...deviceHeaders, 'X-Screen-Device-Token': 'wrong' })).status, 401);
   assert.equal((await f.chat({ ...deviceHeaders, Origin: 'https://foreign.invalid' })).status, 403);
+  assert.equal(f.stats.agent, 0);
+});
+
+test('legacy permanent device credentials cannot consume paid QA or voice', async t => {
+  const f = await fixture(t, { legacy: true });
+  const response = await f.chat();
+  assert.equal(response.status, 401);
+  assert.match((await response.json()).error.message, /新的大屏访问 token/);
+  const { socket, messages } = await f.connect();
+  socket.send(JSON.stringify({ type: 'authenticate', deviceId: 'D1', deviceToken: 'test-device-token' }));
+  await until(() => messages.some(m => m.type === 'error'), 'legacy voice rejected');
+  assert.equal(messages.find(m => m.type === 'error').code, 'ERR_SCREEN_ACCESS_INVALID');
+  assert.equal(f.stats.agent, 0); assert.equal(f.stats.voice, 0);
+});
+
+test('expired runtime configuration is rejected before starting paid QA', async t => {
+  const f = await fixture(t, { expiredConfig: true });
+  const response = await f.chat();
+  assert.equal(response.status, 410);
+  assert.equal((await response.json()).error.code, 'ERR_SCREEN_ACCESS_EXPIRED');
+  assert.equal(f.stats.agent, 0);
+});
+
+test('backend access expiry is preserved through HTTP and WS authentication', async t => {
+  const f = await fixture(t, { accessExpired: true }); f.revoke();
+  const response = await f.chat();
+  assert.equal(response.status, 410);
+  assert.equal((await response.json()).error.code, 'ERR_SCREEN_ACCESS_EXPIRED');
+  const { socket, messages } = await f.connect();
+  socket.send(JSON.stringify({ type: 'authenticate', deviceId: 'D1', deviceToken: 'test-device-token' }));
+  await until(() => messages.some(m => m.type === 'error'), 'expired voice rejected');
+  assert.equal(messages.find(m => m.type === 'error').code, 'ERR_SCREEN_ACCESS_EXPIRED');
+  assert.equal(f.stats.agent, 0); assert.equal(f.stats.voice, 0);
+});
+
+test('runtime session expiry closes an already authenticated idle voice socket', async t => {
+  const f = await fixture(t, { expiryMs: 150 });
+  const { socket, messages } = await f.connect();
+  socket.send(JSON.stringify({ type: 'authenticate', deviceId: 'D1', deviceToken: 'test-device-token' }));
+  await until(() => messages.some(m => m.type === 'authenticated'), 'voice authenticated');
+  await until(() => messages.some(m => m.code === 'ERR_SCREEN_ACCESS_EXPIRED'), 'live voice expired');
+  assert.equal(f.stats.voice, 0);
+});
+
+test('runtime session expiry cancels an active SSE cloud request', async t => {
+  const f = await fixture(t, { expiryMs: 150, hang: true, timeout: 2000 });
+  const startedAt = Date.now();
+  const response = await f.chat();
+  assert.equal(response.status, 200);
+  await response.text().catch(() => {});
+  assert.ok(Date.now() - startedAt < 1000, 'session expiry must cancel before the longer cloud timeout');
+  assert.equal(f.stats.agent, 1);
+  await until(() => f.stats.closed === 1, 'cloud request closed');
+  const retry = await f.chat();
+  assert.equal(retry.status, 410);
+});
+
+test('runtime expiry during a slow request body rejects before any paid cloud call', async t => {
+  const f = await fixture(t, { expiryMs: 150 });
+  const body = Buffer.from(JSON.stringify(question));
+  let request;
+  const result = new Promise((resolve, reject) => {
+    request = http.request(f.origin + '/api/v1/assistant/chat', { method: 'POST',
+      headers: { ...deviceHeaders, 'Content-Type': 'application/json', 'Content-Length': body.length } }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString('utf8') }));
+      response.on('error', reject);
+    });
+    request.on('error', reject);
+  });
+  t.after(() => request.destroy());
+  request.write(body.subarray(0, 1));
+  await until(() => f.stats.authorized === 1, 'request authorized before body completed');
+  await delay(200);
+  request.end(body.subarray(1));
+  const response = await result;
+  assert.equal(response.status, 410);
+  assert.equal(JSON.parse(response.body).error.code, 'ERR_SCREEN_ACCESS_EXPIRED');
   assert.equal(f.stats.agent, 0);
 });
 

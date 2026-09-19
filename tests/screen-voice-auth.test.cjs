@@ -83,6 +83,28 @@ test("认证等待有超时并停止语音启动", async () => {
   assert.equal(h.micCalls(), 0);
 });
 
+test("语音会话到期保留鉴权错误码供页面重新开启", async () => {
+  const h = voiceHarness();
+  const pending = h.voice.startListening();
+  const ws = h.sockets[0]; ws.open();
+  ws.message({ type: "error", scope: "auth", code: "ERR_SCREEN_ACCESS_EXPIRED", message: "本次会话已到期" });
+  assert.equal(await pending, false);
+  assert.ok(h.errors.some(([scope, _message, detail]) => scope === "auth" && detail?.code === "ERR_SCREEN_ACCESS_EXPIRED"));
+  assert.equal(h.micCalls(), 0);
+});
+
+test("退出会话中断已认证连接，握手未结束时也不能迟到开启录音", async () => {
+  const h = voiceHarness();
+  const pending = h.voice.startListening();
+  const ws = h.sockets[0];
+  assert.equal(typeof h.voice.disconnect, "function");
+  h.voice.disconnect();
+  ws.open(); ws.message({ type: "authenticated" });
+  assert.equal(await pending, false);
+  assert.equal(h.micCalls(), 0);
+  assert.equal(ws.readyState, 3);
+});
+
 test("ASR连续错误按退避重试三次后停麦", async () => {
   const h = voiceHarness();
   const pending = h.voice.startListening();

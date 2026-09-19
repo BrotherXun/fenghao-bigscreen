@@ -164,6 +164,7 @@
                   <p class="assistant-label">施工与工程安全</p>
                   <h2 id="assistantTitle">丰浩安全培训助手</h2>
                   <p class="assistant-status" :class="'assistant-state-' + assistantConnectionMode"><i></i>{{ assistantConnection }}</p>
+                  <p v-if="accessMode && accessState === 'active'" class="assistant-status">{{ accessMessage }}</p>
                 </div>
               </div>
               <div class="assistant-actions">
@@ -260,6 +261,25 @@
           </article>
         </section>
       </transition>
+
+      <section v-if="accessMode && accessState !== 'active'" class="admin-login-overlay" aria-label="大屏访问授权">
+        <article class="admin-login-dialog" role="dialog" aria-modal="true" aria-labelledby="screenAccessTitle">
+          <header class="admin-login-header">
+            <div>
+              <p class="admin-kicker">丰浩安全教育终端</p>
+              <h2 id="screenAccessTitle">{{ accessState === 'expired' ? '本次会话已到期' : '开始使用大屏' }}</h2>
+              <p>{{ accessToken ? '每次成功开启扣 1 次，有效期 24 小时。' : '请打开管理员提供的大屏授权链接。' }}</p>
+            </div>
+          </header>
+          <div class="admin-login-form">
+            <p :class="['expired', 'invalid', 'exhausted', 'error'].includes(accessState) ? 'admin-form-error' : 'muted'" role="status">{{ accessMessage }}</p>
+            <div class="admin-login-actions">
+              <button class="btn-primary" type="button" @click="startAccessSession" :disabled="accessBusy || !accessToken || accessState === 'exhausted'">{{ accessBusy ? '正在连接' : (accessSession ? '重试恢复（不扣次）' : (accessState === 'expired' ? '重新开始（扣 1 次）' : (accessRequestId ? '重试本次开启' : '开始使用（扣 1 次）'))) }}</button>
+            </div>
+          </div>
+          <footer class="admin-login-footnote">微信预览和本次会话内刷新不扣次数；同一链接可在其他电脑独立使用。</footer>
+        </article>
+      </section>
 
       <transition name="admin-modal">
         <section v-if="adminLoginOpen" class="admin-login-overlay" aria-label="项目管理员登录" @click.self="closeAdminLogin" @keydown.esc="closeAdminLogin" tabindex="-1">
@@ -441,8 +461,8 @@
       })();
     </script>
     <script data-screen-runtime src="./vendor/vue.global.prod.js"></script>
-    <script data-screen-runtime src="./api.js?v=4"></script>
-    <script data-screen-runtime src="./screen-voice.js?v=3"></script>
-    <script data-screen-runtime src="./screen.js?v=13"></script>
+    <script data-screen-runtime src="./api.js?v=6"></script>
+    <script data-screen-runtime src="./screen-voice.js?v=4"></script>
+    <script data-screen-runtime src="./screen.js?v=15"></script>
   </body>
 </html>

@@ -89,20 +89,20 @@ test("后台清空设备会话后独立轮询停止旧视频并重新进入扫�
   assert.equal(screen.stage, "waiting");
 });
 
-test("问答设备认证失败指向配对，不冒充服务端缺少语音配置", async () => {
+test("旧问答设备认证失败指向新token链接，不冒充服务端缺少语音配置", async () => {
   const { screen } = loadScreen(async () => ({ rawResponse: { ok: false, status: 401 } }), { createVoice: () => ({ isAvailable: () => true }) });
   screen.deviceId = "D1"; screen.deviceToken = "expired-token";
   await screen.checkAssistantStatus();
-  assert.match(screen.assistantConnection, /设备配对/);
-  assert.match(screen.assistantVoiceHint, /设备配对/);
+  assert.match(screen.assistantConnection, /新的大屏访问 token/);
+  assert.match(screen.assistantVoiceHint, /新的大屏访问 token/);
   assert.doesNotMatch(screen.assistantVoiceHint, /缺少.*配置/);
   assert.equal(screen.assistantSpeechEnabled, false);
 });
 
-test("尚无设备身份时网络失败仍先指向配对", async () => {
+test("尚无访问身份时网络失败仍指向新token链接", async () => {
   const { screen } = loadScreen(async () => { throw new Error("network unavailable"); }, { createVoice: () => ({ isAvailable: () => true }) });
   await screen.checkAssistantStatus();
-  assert.match(screen.assistantVoiceHint, /设备配对/);
+  assert.match(screen.assistantVoiceHint, /新的大屏访问 token/);
 });
 
 test("已配对状态查询暂不可用不猜测语音配置缺失", async () => {

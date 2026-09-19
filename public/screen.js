@@ -3,10 +3,22 @@ const { createApp } = Vue;
 const screenApp = createApp({
   data() {
     const params = new URLSearchParams(location.search);
+    const fragment = new URLSearchParams((location.hash || "").replace(/^#/, ""));
+    let savedAccess = null;
+    try { savedAccess = JSON.parse(sessionStorage.getItem("fenghao-screen-access") || "null"); } catch (_) { /* 登录页仍可展示。 */ }
+    const accessMode = fragment.has("token") || (!params.has("deviceId") && savedAccess?.mode === "token");
+    const accessToken = fragment.has("token") ? fragment.get("token") : (savedAccess?.token || "");
+    if (!accessMode || savedAccess?.token !== accessToken) savedAccess = null;
     let deviceId = params.get("deviceId") || "";
     let deviceToken = params.get("deviceToken") || "";
-    try {
-      deviceId ||= localStorage.getItem("fenghao-screen-device-id") || "";
+    if (accessMode) {
+      deviceId = ""; deviceToken = "";
+      try {
+        sessionStorage.setItem("fenghao-screen-access", JSON.stringify({ mode: "token", token: accessToken,
+          requestId: savedAccess?.requestId || "", session: savedAccess?.session || null }));
+        // 片段不会发送到服务器；保留它以便微信打开后仍可复制到另一台电脑。
+      } catch (_) { /* 保留链接；开始前必须能够保存幂等记录。 */ }
+    } else try {
       if (deviceId) deviceToken ||= localStorage.getItem("fenghao-screen-device-token:" + deviceId) || "";
       if (deviceId && deviceToken) {
         localStorage.setItem("fenghao-screen-device-id", deviceId);
@@ -19,6 +31,13 @@ const screenApp = createApp({
       history.replaceState(null, "", (location.pathname || "/screen.html") + (params.size ? "?" + params : "") + (location.hash || ""));
     }
     return {
+      accessMode,
+      accessToken,
+      accessSession: savedAccess?.session || null,
+      accessRequestId: savedAccess?.requestId || "",
+      accessState: savedAccess?.session ? "restoring" : "ready",
+      accessBusy: false,
+      accessMessage: "点击开始使用后开启本次大屏会话，成功开启扣 1 次；本次会话内刷新不扣次。",
       deviceId,
       deviceToken,
       device: {},
@@ -208,10 +227,19 @@ const screenApp = createApp({
   },
   async mounted() {
     this.bindAdminVideoFullscreenEvents();
+    FenghaoApi.onAccessRejected = (error, token) => {
+      if (token && token === this.deviceToken) this.handleAccessError(error);
+    };
+    if (this.accessMode || !this.deviceId || !this.deviceToken) {
+      this.accessMode = true;
+      if (this.accessSession) await this.restoreAccessSession();
+      return;
+    }
     this.startDevicePolling();
     await Promise.all([this.init(), this.openAssistant()]);
   },
   beforeUnmount() {
+    FenghaoApi.onAccessRejected = null;
     this.sessionEpoch += 1;
     this.stopPolling();
     if (this.deviceTimer) clearInterval(this.deviceTimer);
@@ -222,6 +250,109 @@ const screenApp = createApp({
     this.pauseAdminVideo();
   },
   methods: {
+    saveAccessSession() {
+      try {
+        sessionStorage.setItem("fenghao-screen-access", JSON.stringify({ mode: "token", token: this.accessToken,
+          requestId: this.accessRequestId, session: this.accessSession }));
+      } catch (_) { throw new Error("浏览器无法保存会话，请允许此站点使用会话存储后再开始。"); }
+    },
+    canUseScreen() {
+      if (!this.accessMode) return true;
+      if (this.accessState !== "active") return false;
+      if (Date.parse(this.accessSession?.expiresAt) <= Date.now()) {
+        this.handleAccessError({ status: 410, code: "ERR_SCREEN_ACCESS_EXPIRED" });
+        return false;
+      }
+      return Boolean(this.deviceId && this.deviceToken);
+    },
+    handleAccessError(error) {
+      if (!this.accessMode) return false;
+      // 学习二维码也会返回 410；只有访问授权自己的错误码才结束本次付费会话。
+      const expired = error.code === "ERR_SCREEN_ACCESS_EXPIRED";
+      const exhausted = error.code === "ERR_SCREEN_ACCESS_EXHAUSTED";
+      const invalid = error.code === "ERR_SCREEN_ACCESS_INVALID" || [401, 403].includes(error.status);
+      if (!expired && !exhausted && !invalid) return false;
+      this.accessState = expired ? "expired" : exhausted ? "exhausted" : "invalid";
+      this.accessMessage = expired ? "本次大屏会话已到期。点击重新开始可开启新会话并扣 1 次。"
+        : exhausted ? "此链接的使用次数已用完，请联系管理员获取新链接。" : "此大屏链接或会话已失效，请联系管理员确认授权。";
+      this.sessionEpoch += 1;
+      this.stopPolling();
+      if (this.deviceTimer) clearInterval(this.deviceTimer);
+      this.deviceTimer = null;
+      this.$refs.learningVideo?.pause();
+      this.stopAssistantVoice();
+      this.assistantVoice?.disconnect?.();
+      this.assistantVoice = null;
+      this.cancelAssistantRequest();
+      this.closeAdminLogin();
+      this.adminLoginOpen = false;
+      this.adminLoginForm.password = "";
+      this.closeAdminVideoCenter();
+      this.adminSession = null;
+      this.assistantSpeechEnabled = false;
+      this.assistantSpeechConfigured = false;
+      this.assistantConnection = this.accessMessage;
+      this.assistantConnectionMode = "access";
+      this.assistantVoiceHint = this.accessMessage;
+      this.deviceId = ""; this.deviceToken = ""; this.device = {};
+      this.session = {}; this.videos = []; this.playbackStates = {};
+      this.busy = false;
+      this.accessSession = null; this.accessRequestId = "";
+      try { this.saveAccessSession(); } catch (_) { /* 失效凭据不会再用于本页面请求。 */ }
+      return true;
+    },
+    async acceptAccessSession(data) {
+      if (!data?.accessSessionId || !data.deviceId || !data.deviceToken || !Number.isFinite(Date.parse(data.expiresAt))) {
+        throw new Error("会话响应不完整，请点击重试以恢复本次开启结果。");
+      }
+      this.accessSession = data;
+      this.saveAccessSession();
+      this.deviceId = data.deviceId; this.deviceToken = data.deviceToken;
+      this.accessState = "active";
+      this.accessMessage = `剩余 ${data.remainingUses} 次（共 ${data.maxUses} 次）；本次会话内刷新不扣次。`;
+      if (!this.canUseScreen()) return;
+      this.startDevicePolling();
+      await Promise.all([this.init(), this.openAssistant()]);
+    },
+    async restoreAccessSession() {
+      if (this.accessBusy || !this.accessSession) return;
+      this.accessBusy = true;
+      this.accessState = "restoring";
+      this.accessMessage = "正在恢复本次会话，不会扣除使用次数…";
+      try {
+        const data = await FenghaoApi.screenAccessSession(this.accessSession.accessSessionId, this.accessSession.deviceToken);
+        await this.acceptAccessSession(data);
+      } catch (error) {
+        if (!this.handleAccessError(error)) {
+          this.accessState = "error";
+          this.accessMessage = "暂时无法恢复本次会话，请重试恢复；不会自动开启新会话。";
+        }
+      } finally { this.accessBusy = false; }
+    },
+    async startAccessSession() {
+      if (this.accessBusy || this.accessState === "active" || this.accessState === "exhausted") return;
+      if (this.accessSession) return this.restoreAccessSession();
+      if (!this.accessToken) {
+        this.accessMessage = "请使用管理员提供的大屏授权链接打开页面。";
+        return;
+      }
+      this.accessBusy = true;
+      try {
+        if (!this.accessRequestId) {
+          const bytes = crypto.getRandomValues(new Uint8Array(16));
+          this.accessRequestId = Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+        }
+        // 先保存请求标识。结果未知时刷新或重试都沿用同一标识，不能再次扣次。
+        this.saveAccessSession();
+        const data = await FenghaoApi.createScreenAccessSession(this.accessToken, this.accessRequestId);
+        await this.acceptAccessSession(data);
+      } catch (error) {
+        if (!this.handleAccessError(error)) {
+          this.accessState = "error";
+          this.accessMessage = error.message || "本次开启结果暂无法确认，请点击重试恢复同一次请求。";
+        }
+      } finally { this.accessBusy = false; }
+    },
     deviceHeaders() {
       return { "X-Screen-Device-ID": this.deviceId, "X-Screen-Device-Token": this.deviceToken };
     },
@@ -238,10 +369,14 @@ const screenApp = createApp({
       video.autoplay = config.autoPlay !== false;
     },
     async pollDeviceCommands() {
+      if (!this.canUseScreen()) return;
       if (this.commandBusy || !this.deviceId || !this.deviceToken) return;
+      const deviceToken = this.deviceToken;
       this.commandBusy = true;
       try {
-        this.device = await FenghaoApi.screenConfig(this.deviceId, this.deviceToken);
+        const device = await FenghaoApi.screenConfig(this.deviceId, deviceToken);
+        if (deviceToken !== this.deviceToken || !this.canUseScreen()) return;
+        this.device = device;
         this.applyPlayback();
         if (!this.busy && this.session.sessionId && Object.prototype.hasOwnProperty.call(this.device, "currentSessionId")
           && this.device.currentSessionId === null) {
@@ -249,6 +384,7 @@ const screenApp = createApp({
           await this.createSession();
         }
         const commands = await FenghaoApi.screenDeviceCommands(this.deviceId, this.deviceToken);
+        if (deviceToken !== this.deviceToken || !this.canUseScreen()) return;
         for (const command of commands) {
           let result = { status: "FAILED", detail: "浏览器终端不支持操作系统重启" };
           if (command.action === "RECONNECT") {
@@ -258,6 +394,7 @@ const screenApp = createApp({
               const sessionId = this.device.currentSessionId || this.session.sessionId;
               if (sessionId) {
                 const data = await FenghaoApi.screenSession(sessionId, this.deviceToken);
+                if (deviceToken !== this.deviceToken || !this.canUseScreen()) return;
                 if (data?.sessionId !== sessionId) throw new Error("会话响应不匹配。");
                 this.session = data;
                 this.videos = data.videos || [];
@@ -270,9 +407,11 @@ const screenApp = createApp({
               result = { status: "SUCCESS", detail: "设备配置和当前会话已重新同步" };
             } catch (error) { result = { status: "FAILED", detail: error.message || "设备重连失败" }; }
           } else if (command.action !== "RESTART") result.detail = "浏览器终端不支持此设备指令";
+          if (deviceToken !== this.deviceToken || !this.canUseScreen()) return;
           await FenghaoApi.ackScreenDeviceCommand(this.deviceId, command.id, this.deviceToken, result);
         }
       } catch (error) {
+        if (deviceToken !== this.deviceToken) return;
         this.error = error.message || "设备同步失败，请检查网络或设备配置。";
         if ([401, 403].includes(error.status)) {
           this.$refs.learningVideo?.pause();
@@ -289,17 +428,28 @@ const screenApp = createApp({
         && context.deviceToken === this.deviceToken;
     },
     async init() {
+      if (!this.canUseScreen()) return;
+      const deviceToken = this.deviceToken;
       this.stage = "boot";
       this.error = "";
       try {
         if (!this.deviceId || !this.deviceToken) throw new Error("请由管理员配置设备编号与设备令牌后启动大屏。");
-        this.device = await FenghaoApi.screenConfig(this.deviceId, this.deviceToken);
-        await this.createSession();
+        const device = await FenghaoApi.screenConfig(this.deviceId, deviceToken);
+        if (deviceToken !== this.deviceToken || !this.canUseScreen()) return;
+        this.device = device;
+        if (this.device.currentSessionId) {
+          this.session = { sessionId: this.device.currentSessionId };
+          this.stage = "waiting";
+          await this.pollSession();
+          if (deviceToken !== this.deviceToken || !this.canUseScreen()) return;
+          this.startPolling();
+        } else await this.createSession();
       } catch (error) {
         this.error = error.message || "大屏机初始化失败";
       }
     },
     async createSession() {
+      if (!this.canUseScreen()) return;
       const epoch = ++this.sessionEpoch;
       this.playbackStates = {};
       this.stopPolling();
@@ -457,6 +607,13 @@ const screenApp = createApp({
           return await this.postLearningPlayback(state);
         } catch (error) {
           if (this.isCurrentLearningContext(state.context)) {
+            // This explicit rejection occurs before persistence; uncertain failures keep pending.
+            if (state.pending?.type === "HEARTBEAT" && error.status === 409
+              && error.code === "ERR_PLAYBACK_EVENT_INVALID"
+              && error.message === "请先发送 START 开始或恢复播放") {
+              state.pending = null;
+              state.playing = false;
+            }
             state.failed = true;
             this.error = error.message || "播放记录保存失败，请重试当前记录。";
             state.player.pause();
@@ -682,6 +839,8 @@ const screenApp = createApp({
       this.adminLoginForm.password = "";
     },
     async submitAdminLogin() {
+      if (!this.canUseScreen()) return;
+      const accessSessionId = this.accessSession?.accessSessionId;
       const username = this.adminLoginForm.username.trim();
       const password = this.adminLoginForm.password;
       if (!username || !password || this.adminLoginBusy) return;
@@ -693,6 +852,7 @@ const screenApp = createApp({
           requiresAuth: false,
           body: JSON.stringify({ username, password }),
         });
+        if (accessSessionId !== this.accessSession?.accessSessionId || !this.canUseScreen()) return;
         if (!data?.token || !this.isProjectAdminRole(data.role)) {
           throw new Error("该账号不是项目管理员，不能使用大屏视频查看。");
         }
@@ -721,6 +881,7 @@ const screenApp = createApp({
       }
     },
     openAdminVideoCenter() {
+      if (!this.canUseScreen()) return;
       if (!this.adminSession) {
         this.openAdminLogin();
         return;
@@ -976,10 +1137,16 @@ const screenApp = createApp({
       this.scrollAssistantToLatest();
     },
     async checkAssistantStatus() {
+      if (!this.canUseScreen()) return;
+      const deviceToken = this.deviceToken;
       try {
         const response = await fetch("/api/v1/assistant/status", { cache: "no-store", headers: this.deviceHeaders() });
-        if (!response.ok) throw Object.assign(new Error("问答服务不可用"), { status: response.status });
+        if (!response.ok) {
+          const payload = await response.json?.().catch(() => null);
+          throw Object.assign(new Error(payload?.error?.message || "问答服务不可用"), { status: response.status, code: payload?.error?.code });
+        }
         const status = await response.json();
+        if (deviceToken !== this.deviceToken || !this.canUseScreen()) return;
         if (status.configured) {
           this.assistantConnection = "联网问答已配置 · 待实际提问验证";
           this.assistantConnectionMode = "online";
@@ -990,14 +1157,16 @@ const screenApp = createApp({
         this.assistantSpeechConfigured = Boolean(status.speech);
         this.setupAssistantVoice();
       } catch (error) {
+        if (deviceToken !== this.deviceToken || this.handleAccessError(error)) return;
         const pairingRequired = !this.deviceId || !this.deviceToken || error.status === 401;
-        this.assistantConnection = pairingRequired ? "请先完成大屏设备配对" : "服务暂不可用";
+        this.assistantConnection = pairingRequired ? "请使用新的大屏访问 token 链接" : "服务暂不可用";
         this.assistantConnectionMode = pairingRequired ? "pairing" : "error";
         this.assistantSpeechConfigured = false;
         this.setupAssistantVoice();
       }
     },
     setupAssistantVoice() {
+      if (!this.canUseScreen()) return;
       if (!this.assistantVoice && typeof window.createVoice === "function") {
         const screen = this;
         this.assistantVoice = window.createVoice({
@@ -1014,7 +1183,8 @@ const screenApp = createApp({
             screen.assistantInput = text;
             screen.sendAssistantQuestion();
           },
-          onError(scope, message) {
+          onError(scope, message, detail) {
+            if (scope === "auth" && screen.handleAccessError({ code: detail?.code })) return;
             screen.assistantVoiceStatus = message || "语音服务暂不可用。";
             if (scope === "mic" || scope === "connection") {
               screen.assistantVoiceListening = false;
@@ -1026,7 +1196,7 @@ const screenApp = createApp({
       const browserSupported = Boolean(this.assistantVoice?.isAvailable?.());
       this.assistantSpeechEnabled = this.assistantSpeechConfigured && browserSupported;
       if (this.assistantConnectionMode === "pairing") {
-        this.assistantVoiceHint = "请先完成大屏设备配对，再使用语音问答";
+        this.assistantVoiceHint = "请使用新的大屏访问 token 链接开启语音问答";
       } else if (this.assistantConnectionMode === "error") {
         this.assistantVoiceHint = "语音服务状态暂无法确认，请稍后重试";
       } else if (!browserSupported) {
@@ -1050,6 +1220,7 @@ const screenApp = createApp({
       this.assistantVoiceListening = Boolean(this.assistantVoice?.isListening?.());
     },
     async toggleAssistantVoice() {
+      if (!this.canUseScreen()) return;
       if (!this.assistantSpeechEnabled || !this.assistantVoice || this.assistantVoiceStarting) return;
       if (this.assistantVoice.isListening()) {
         this.stopAssistantVoice();
@@ -1100,6 +1271,7 @@ const screenApp = createApp({
       await this.sendAssistantQuestion();
     },
     async sendAssistantQuestion() {
+      if (!this.canUseScreen()) return;
       const question = this.assistantInput.trim();
       if (!question) return;
       if (this.assistantBusy) this.cancelAssistantRequest();
@@ -1135,7 +1307,7 @@ const screenApp = createApp({
         if (requestId !== this.assistantRequestId) return;
         if (!response.ok) {
           const payload = await response.json().catch(() => ({}));
-          throw new Error(payload?.error?.message || "问答服务暂不可用，请稍后重试。");
+          throw Object.assign(new Error(payload?.error?.message || "问答服务暂不可用，请稍后重试。"), { status: response.status, code: payload?.error?.code });
         }
         const contentType = response.headers.get("content-type") || "";
         if (contentType.includes("text/event-stream")) {
@@ -1153,6 +1325,7 @@ const screenApp = createApp({
         if (this.assistantSpeakingThisTurn) this.assistantVoice.endSpeech();
       } catch (error) {
         if (requestId !== this.assistantRequestId) return;
+        if (this.handleAccessError(error)) return;
         if (this.assistantSpeakingThisTurn) this.assistantVoice.cancelSpeech();
         assistantMessage.processing = "";
         assistantMessage.content = `抱歉，本次问答未能完成。**${error?.message || "服务暂不可用，请稍后重试。"}**`;

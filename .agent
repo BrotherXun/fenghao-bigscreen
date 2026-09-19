@@ -20,14 +20,14 @@ Node 是此大屏的服务端网关，不是 Java 业务后端。它提供静态
 
 1. Node.js >=22；在仓库根目录运行 npm ci。
 2. 复制 .env.example 为 .env，设置 FENGHAO_API_BASE 和云服务凭证。
-3. npm start；打开 http://127.0.0.1:4173/ 或 /screen.html?deviceId=SCR-001。
+3. npm start；使用管理员签发的 /screen.html#token=... 链接，点击“开始使用”。
 4. Java 后端独立启动，详见 README.md。后台和 App 也分别运行，不打包进本仓库。
 
 默认端口 4173，Java 默认 8080。可用 FENGHAO_MANAGEMENT_HOST、FENGHAO_MANAGEMENT_PORT 修改监听设置。系统环境变量优先，其次 FENGHAO_ASSISTANT_ENV 指定文件，再次根目录 .env。没有跨仓库临时路径回退。
 
 浏览器统一使用同源路径，public/api.js 不读取后台管理会话，不提供 apiBase/backend 查询参数覆盖。业务目标由服务器 FENGHAO_API_BASE 统一指定，避免浏览器将设备令牌发送给其他地址。
 
-设备令牌使用 X-Screen-Device-Token；来自页面 deviceToken 参数或此浏览器 localStorage。SCR-DEMO-TOKEN 是现有本地演示默认值，不是生产凭证。设备必须在后端存在且令牌匹配。视频管理使用登录返回的 Bearer token，只保存在页面内存，刷新需重新登录。
+访问 token 不绑定设备或浏览器，首批每个 200 次，由 Java 持久化计数；显式成功开启后会话有效 24 小时。微信预览不扣次，同一会话通过 sessionStorage 恢复，不重复扣次；结果未知的请求保留 requestId 幂等重试。地址栏 #token 片段保留，便于转发到其他电脑。内部运行凭据使用 X-Screen-Device-Token，不保存到 localStorage；问答和语音必须校验有效的 accessSessionId/accessExpiresAt。旧 deviceId/deviceToken 链接仅兼容原学习流程，不能使用付费 AI。视频管理仍使用项目管理员 Bearer token，仅保存在页面内存，刷新需重新登录。
 
 ## 文件地图
 
@@ -49,6 +49,8 @@ Node 是此大屏的服务端网关，不是 Java 业务后端。它提供静态
 | 问答状态 | GET /api/v1/assistant/status | Node；configured/speech 表示凭证是否齐备，不代表云端已实测可用 |
 | 问答 | POST /api/v1/assistant/chat | Node → 火山 Agent；SSE 流式响应 |
 | 语音 | WS /ws/voice | Node → 火山 ASR/TTS；PCM 与控制消息 |
+| 开启授权 | POST /api/v1/screen/access-sessions | Java；{token, requestId}，成功开启扣 1 次，重试幂等 |
+| 恢复授权 | GET /api/v1/screen/access-sessions/{id} | Java；需运行令牌，恢复不扣次 |
 | 设备配置 | GET /api/v1/screen-devices/{deviceId}/config | Java ScreenLearningController；需设备令牌 |
 | 创建会话 | POST /api/v1/screen-sessions | Java；请求体 {deviceId} |
 | 会话轮询 | GET /api/v1/screen-sessions/{sessionId} | Java；等待扫码阶段约每 2 秒读取 |

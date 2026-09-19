@@ -12,7 +12,7 @@ cp .env.example .env
 npm start
 ```
 
-编辑 `.env` 配置后端地址和火山引擎凭证。打开 http://127.0.0.1:4173/screen.html?deviceId=SCR-001 。根地址 / 也直接显示问答首页。请通过 HTTP 服务访问，勿直接双击 HTML 文件。
+编辑 `.env` 配置后端地址和火山引擎凭证。使用管理员签发的 `http://127.0.0.1:4173/screen.html#token=...` 链接并点击“开始使用”；根地址显示授权入口。请通过 HTTP 服务访问，勿直接双击 HTML 文件。
 
 问答需要 `VOLC_BOT_ID`、`VOLC_API_KEY`；语音还需要 `VOLC_SPEECH_APP_ID`、`VOLC_SPEECH_ACCESS_TOKEN` 及账号已开通的识别服务和音色。配置为空时能展示界面，但不能完成真实问答/语音。
 
@@ -25,7 +25,7 @@ java -jar target/fenghao-safety-1.0.0.jar --spring.profiles.active=local
 
 该配置使用后端 `data/` 中的持久化本地数据库。本仓库不包含 Java 后端、数据库或后台管理页面。
 
-设备需要在后台登记，并配置匹配的设备 ID 和设备令牌。现有代码的 `SCR-001` / `SCR-DEMO-TOKEN` 仅用于后端本地演示配置。正式设备可在首次访问时通过 `deviceId` 和 `deviceToken` 参数设置，令牌随后保存在此浏览器 localStorage 中；勿分享带真实令牌的地址。视频入口要求项目管理员登录。
+访问 token 不绑定电脑，首批每个 200 次，由后端记录成功开启次数。每次会话有效 24 小时，微信预览与同会话刷新不扣次；开启结果未知时保留同一 requestId 重试。#token 片段保留，方便从微信转发到其他电脑；sessionStorage 仅保存当前页面会话的恢复信息。旧 deviceId/deviceToken 链接兼容原学习流程，但问答与语音只接受有效 token 会话。视频入口仍要求项目管理员登录。
 
 ## 配置与部署
 

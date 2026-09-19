@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const https = require("node:https");
 const path = require("node:path");
-const { createGatewayAccess, boundedNumber } = require("./gateway-access.cjs");
+const { createGatewayAccess, boundedNumber, GatewayError } = require("./gateway-access.cjs");
 
 const publicRoot = path.resolve(__dirname, "public");
 const assistantEnvFiles = [
@@ -149,11 +149,14 @@ async function proxyAssistantChat(request, response, principal) {
   }
 
   if (request.aborted || response.destroyed) return;
+  if (principal.expiresAt <= Date.now()) {
+    throw new GatewayError(410, 'ERR_SCREEN_ACCESS_EXPIRED', '本次大屏会话已到期，请重新开始。');
+  }
   const release = gatewayAccess.acquire('chat', principal.deviceId);
   try { gatewayAccess.checkStartRate('chat', principal.deviceId); }
   catch (error) { release(); throw error; }
   const controller = new AbortController();
-  const lifetime = boundedNumber(process.env.FENGHAO_ASSISTANT_TIMEOUT_MS, 120000, 100, 300000);
+  const lifetime = Math.max(1, Math.min(boundedNumber(process.env.FENGHAO_ASSISTANT_TIMEOUT_MS, 120000, 100, 300000), principal.expiresAt - Date.now()));
   const timeout = setTimeout(() => controller.abort(), lifetime);
   const cancel = () => controller.abort();
   response.on('close', cancel);
@@ -166,6 +169,16 @@ async function proxyAssistantChat(request, response, principal) {
     };
     const browsingMode = Number(process.env.VOLC_BROWSING_MODE);
     if (Number.isFinite(browsingMode)) extensionOptions.browsing_mode = browsingMode;
+    const upstreamBody = JSON.stringify({
+      bot_id: process.env.VOLC_BOT_ID,
+      messages,
+      stream: true,
+      user_id: process.env.VOLC_USER_ID || "fenghao-screen-terminal",
+      extension_options: extensionOptions,
+    });
+    if (principal.expiresAt <= Date.now()) {
+      throw new GatewayError(410, 'ERR_SCREEN_ACCESS_EXPIRED', '本次大屏会话已到期，请重新开始。');
+    }
     const upstream = await fetch(assistantEndpoint, {
       method: "POST",
       headers: {
@@ -173,13 +186,7 @@ async function proxyAssistantChat(request, response, principal) {
         "Content-Type": "application/json",
         ServiceName: "ask_echo",
       },
-      body: JSON.stringify({
-        bot_id: process.env.VOLC_BOT_ID,
-        messages,
-        stream: true,
-        user_id: process.env.VOLC_USER_ID || "fenghao-screen-terminal",
-        extension_options: extensionOptions,
-      }),
+      body: upstreamBody,
       signal: controller.signal,
     });
     if (!upstream.ok) {
@@ -211,6 +218,7 @@ async function proxyAssistantChat(request, response, principal) {
     response.end();
   } catch (error) {
     if (response.destroyed) return;
+    if (error instanceof GatewayError) throw error;
     const message = controller.signal.aborted ? "智能体服务响应超时，请重试。" : "无法连接智能体服务。";
     if (!response.headersSent) sendAssistantJson(response, 502, { error: { code: "agent_unavailable", message } });
     else response.destroy();

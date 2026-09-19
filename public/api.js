@@ -13,6 +13,8 @@
     if (!response.ok || payload?.success === false) {
       const error = new Error(payload?.message || "后端请求失败，请检查设备配置和服务连接。");
       error.status = response.status;
+      error.code = payload?.code;
+      window.FenghaoApi.onAccessRejected?.(error, deviceToken);
       throw error;
     }
     return payload && Object.prototype.hasOwnProperty.call(payload, "success") ? payload.data : payload;
@@ -20,6 +22,8 @@
   const sessionPath = (id) => "/api/v1/screen-sessions/" + encodeURIComponent(id);
   window.FenghaoApi = {
     apiBase: "",
+    createScreenAccessSession: (token, requestId) => request("/api/v1/screen/access-sessions", null, "POST", { token, requestId }),
+    screenAccessSession: (id, token) => request("/api/v1/screen/access-sessions/" + encodeURIComponent(id), token),
     screenConfig: (id, token) => request("/api/v1/screen-devices/" + encodeURIComponent(id) + "/config", token),
     screenDeviceCommands: (id, token) => request("/api/v1/screen-devices/" + encodeURIComponent(id) + "/commands", token),
     ackScreenDeviceCommand: (id, commandId, token, body) => request("/api/v1/screen-devices/" + encodeURIComponent(id) + "/commands/" + encodeURIComponent(commandId) + "/ack", token, "POST", body),

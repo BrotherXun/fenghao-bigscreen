@@ -203,6 +203,10 @@ class VoiceConnection {
     if (this.closed) return;
     this.releaseAccess = this.access.acquire('voice', principal.deviceId, 2);
     this.principal = principal;
+    this.accessExpiryTimer = setTimeout(() => this.rejectAccess(new gatewayModule.GatewayError(
+      410, 'ERR_SCREEN_ACCESS_EXPIRED', '本次大屏会话已到期，请重新开始。'
+    )), Math.max(1, principal.expiresAt - Date.now()));
+    this.accessExpiryTimer.unref();
     clearTimeout(this.authTimer);
     this.sendJson({ type: 'authenticated', asrSampleRate: ASR_SAMPLE_RATE, ttsSampleRate: TTS_SAMPLE_RATE });
   }
@@ -271,6 +275,7 @@ class VoiceConnection {
     this.closed = true;
     clearTimeout(this.authTimer);
     clearInterval(this.idleTimer);
+    clearTimeout(this.accessExpiryTimer);
     if (this.releaseAccess) this.releaseAccess();
     this.principal = null;
     this.stopAsr();

@@ -1,4 +1,4 @@
-// Paid assistant access uses the Java device registry; credentials stay server-side.
+// Paid assistant access requires a live token session in the Java device registry.
 class GatewayError extends Error {
   constructor(status, code, message) { super(message); this.status = status; this.code = code; }
 }
@@ -26,7 +26,7 @@ function createGatewayAccess(apiBase, env = process.env) {
   async function authenticate(deviceId, deviceToken) {
     if (typeof deviceId !== 'string' || !/^[a-zA-Z0-9_-]{1,128}$/.test(deviceId)
       || typeof deviceToken !== 'string' || !deviceToken || deviceToken.length > 512 || /\s/.test(deviceToken)) {
-      throw new GatewayError(401, 'device_auth_required', '请先配置有效的大屏设备和设备令牌。');
+      throw new GatewayError(401, 'ERR_SCREEN_ACCESS_INVALID', '请使用新的大屏访问 token 链接。');
     }
     let response;
     let payload;
@@ -35,16 +35,23 @@ function createGatewayAccess(apiBase, env = process.env) {
         headers: { 'X-Screen-Device-Token': deviceToken, Accept: 'application/json' },
         signal: AbortSignal.timeout(5000),
       });
-      if (response.ok) payload = await response.json();
-      else await response.body?.cancel();
+      payload = await response.json().catch(() => null);
     } catch {
       throw new GatewayError(503, 'device_auth_unavailable', '设备认证服务暂不可用，请稍后重试。');
     }
     if (response.status >= 500) throw new GatewayError(503, 'device_auth_unavailable', '设备认证服务暂不可用，请稍后重试。');
-    if (!response.ok || payload?.success !== true || payload.data?.deviceId !== deviceId) {
-      throw new GatewayError(401, 'device_auth_failed', '设备令牌已失效或设备不可用，请联系管理员。');
+    if (response.status === 410 || payload?.code === 'ERR_SCREEN_ACCESS_EXPIRED') {
+      throw new GatewayError(410, 'ERR_SCREEN_ACCESS_EXPIRED', '本次大屏会话已到期，请重新开始。');
     }
-    return { deviceId, deviceToken };
+    if (!response.ok || payload?.success !== true || payload.data?.deviceId !== deviceId) {
+      throw new GatewayError(401, 'ERR_SCREEN_ACCESS_INVALID', '大屏授权已失效，请使用新的大屏访问 token 链接。');
+    }
+    const expiresAt = Date.parse(payload.data.accessExpiresAt);
+    if (typeof payload.data.accessSessionId !== 'string' || !payload.data.accessSessionId || !Number.isFinite(expiresAt)) {
+      throw new GatewayError(401, 'ERR_SCREEN_ACCESS_INVALID', '请使用新的大屏访问 token 链接。');
+    }
+    if (expiresAt <= Date.now()) throw new GatewayError(410, 'ERR_SCREEN_ACCESS_EXPIRED', '本次大屏会话已到期，请重新开始。');
+    return { deviceId, deviceToken, accessSessionId: payload.data.accessSessionId, expiresAt };
   }
 
   async function authenticateRequest(request) {
