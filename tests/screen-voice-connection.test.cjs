@@ -12,9 +12,9 @@ const screenHtml = fs.readFileSync(path.join(__dirname, "../public/screen.html")
 const screenCss = fs.readFileSync(path.join(__dirname, "../public/screen.css"), "utf8");
 const serverSource = fs.readFileSync(path.join(__dirname, "../server.cjs"), "utf8");
 const voiceBridgeSource = fs.readFileSync(path.join(__dirname, "../voice/bridge.mjs"), "utf8");
-const speakingCharacterPath = path.join(__dirname, "../public/assets/safety-assistant-woman-speaking-hd.png");
-const thinkingCharacterPath = path.join(__dirname, "../public/assets/safety-assistant-woman-thinking-hd.png");
-const speakingLoopPath = path.join(__dirname, "../public/assets/safety-assistant-woman-speaking-loop.webm");
+const speakingCharacterPath = path.join(__dirname, "../public/assets/safety-assistant-cartoon-idle-v2.png");
+const thinkingCharacterPath = path.join(__dirname, "../public/assets/safety-assistant-cartoon-thinking-v2.png");
+const speakingLoopPath = path.join(__dirname, "../public/assets/safety-assistant-cartoon-speaking-v2.webm");
 
 function loadScreen(fetchImpl, createVoice) {
   let options;
@@ -97,15 +97,15 @@ test("语音播报默认使用成熟姐姐音色", () => {
   assert.doesNotMatch(`${serverSource}\n${voiceBridgeSource}`, /zh_male_m191_uranus_bigtts/);
 });
 
-test("语音模式使用戴安全帽的真人安全员，并用思考和讲解动作区分状态", () => {
+test("语音模式使用戴安全帽的卡通安全员，并用思考和讲解动作区分状态", () => {
   const speakingCharacter = fs.readFileSync(speakingCharacterPath);
   const thinkingCharacter = fs.readFileSync(thinkingCharacterPath);
   const speakingLoop = fs.readFileSync(speakingLoopPath);
-  assert.match(screenHtml, /assets\/safety-assistant-woman-speaking-hd\.png/);
-  assert.match(screenHtml, /assets\/safety-assistant-woman-thinking-hd\.png/);
-  assert.match(screenHtml, /width="1644" height="1800"/);
+  assert.match(screenHtml, /assets\/safety-assistant-cartoon-idle-v2\.png/);
+  assert.match(screenHtml, /assets\/safety-assistant-cartoon-thinking-v2\.png/);
+  assert.match(screenHtml, /width="660" height="720"/);
   assert.match(screenHtml, /ref="assistantSpeakingVideo"[^>]*muted[^>]*loop[^>]*playsinline/);
-  assert.match(screenHtml, /assets\/safety-assistant-woman-speaking-loop\.webm/);
+  assert.match(screenHtml, /assets\/safety-assistant-cartoon-speaking-v2\.webm/);
   assert.match(screenHtml, /assistant-mascot-figure/);
   assert.match(screenHtml, /assistant-mascot-pose-speaking/);
   assert.match(screenHtml, /assistant-mascot-pose-thinking/);

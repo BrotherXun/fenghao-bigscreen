@@ -51,15 +51,15 @@ test("uncompiled Vue content is hidden even when author CSS sets display", () =>
 });
 
 test("mascot image, poster and video URLs are only bound after Vue mounts", () => {
-  const media = [...html.matchAll(/<(?:img|video|source)\b[^>]*assistant-(?:woman|mascot)[^>]*>/g)].map((m) => m[0]);
+  const media = [...html.matchAll(/<(?:img|video|source)\b[^>]*assistant-(?:woman|mascot|cartoon)[^>]*>/g)].map((m) => m[0]);
   assert.equal(media.length, 4);
   for (const tag of media) assert.doesNotMatch(tag, /\s(?:src|poster)\s*=/);
-  assert.match(media[0], /:src="'\.\/assets\/safety-assistant-woman-speaking-hd\.png'"/);
-  assert.match(media[1], /:src="'\.\/assets\/safety-assistant-woman-thinking-hd\.png'"/);
-  assert.match(media[2], /:poster="'\.\/assets\/safety-assistant-woman-speaking-hd\.png'"/);
+  assert.match(media[0], /:src="'\.\/assets\/safety-assistant-cartoon-idle-v2\.png'"/);
+  assert.match(media[1], /:src="'\.\/assets\/safety-assistant-cartoon-thinking-v2\.png'"/);
+  assert.match(media[2], /:poster="'\.\/assets\/safety-assistant-cartoon-idle-v2\.png'"/);
   assert.match(media[2], /muted loop playsinline preload="metadata"/);
-  assert.match(media[3], /:src="'\.\/assets\/safety-assistant-woman-speaking-loop\.webm'"/);
-  for (const tag of media.slice(0, 2)) assert.match(tag, /width="1644" height="1800"/);
+  assert.match(media[3], /:src="'\.\/assets\/safety-assistant-cartoon-speaking-v2\.webm'"/);
+  for (const tag of media.slice(0, 2)) assert.match(tag, /width="660" height="720"/);
 });
 
 test("startup guard precedes the four original scripts in their dependency order", () => {

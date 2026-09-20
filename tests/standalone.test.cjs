@@ -60,7 +60,7 @@ test("独立网关启动、首页、媒体类型、配置隔离和业务代理",
   const home = await fetch(origin);
   assert.equal(home.status, 200);
   assert.match(await home.text(), /扫码学习/);
-  const video = await fetch(origin + "/assets/safety-assistant-woman-speaking-loop.webm");
+  const video = await fetch(origin + "/assets/safety-assistant-cartoon-speaking-v2.webm");
   assert.equal(video.headers.get("content-type"), "video/webm");
   assert.ok((await video.arrayBuffer()).byteLength > 1000);
   assert.equal((await fetch(origin + "/.env")).status, 404);

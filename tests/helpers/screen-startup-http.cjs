@@ -8,7 +8,8 @@ const root = path.join(__dirname, "../..");
 const baseline = "2c46e33f04421291f2b253018c5bb9ceaac294e3";
 const files = ["screen.html", "screen.css", "screen.js", "api.js", "screen-voice.js", "pcm-worklet.js",
   "vendor/vue.global.prod.js", "assets/safety-assistant-woman-speaking-hd.png",
-  "assets/safety-assistant-woman-thinking-hd.png", "assets/safety-assistant-woman-speaking-loop.webm"];
+  "assets/safety-assistant-woman-thinking-hd.png", "assets/safety-assistant-woman-speaking-loop.webm",
+  "assets/safety-assistant-cartoon-idle-v2.png", "assets/safety-assistant-cartoon-thinking-v2.png", "assets/safety-assistant-cartoon-speaking-v2.webm"];
 const types = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
   ".js": "application/javascript; charset=utf-8", ".png": "image/png", ".webm": "video/webm" };
 

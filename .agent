@@ -76,7 +76,7 @@ Node 是此大屏的服务端网关，不是 Java 业务后端。它提供静态
 - 右上方“扫码学习”切换学习界面；“视频播放”进入项目管理员视频查看流程。
 - 打开问答时检查云服务状态，并与设备初始化独立进行；Java 不可用时问答页面仍可展示。
 - 关闭问答必须停止聆听/播报；保留已有打断缓存机制，识别连接就绪前不能丢掉首句。
-- 聆听/思考使用思考姿态图片；播报使用 speaking-loop.webm，容器 animation:none、transform:none。
+- 聆听/思考使用 safety-assistant-cartoon-thinking-v2.png；待机使用 safety-assistant-cartoon-idle-v2.png；播报使用 safety-assistant-cartoon-speaking-v2.webm（红色安全帽卡通角色），容器 animation:none、transform:none。
 - 循环素材已按约 1.3 倍速处理，不能再设为 1.3 重复加速。嘴部为视频内动作，不再叠加 CSS 假嘴；素材不保证逐字口型同步。
 - 语音回答通常 1-3 句、80 字以内，限定施工与工程安全；播报语速参数需传到服务端 TTS。
 - 语音链：浏览器 PCM16/16k → ASR；TTS PCM16/24k → 浏览器。WS 正在握手时避免提前 close。
