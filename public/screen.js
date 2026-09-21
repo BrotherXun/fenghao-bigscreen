@@ -128,6 +128,7 @@ const screenApp = createApp({
       return labels[this.session.status] || "正在准备";
     },
     displayExpireAt() {
+      if (this.session.status === "expired") return "请重新生成二维码";
       if (!this.session.expireAt) return "正在生成";
       const date = new Date(this.session.expireAt);
       if (Number.isNaN(date.getTime())) return "请重新生成二维码";
@@ -475,6 +476,7 @@ const screenApp = createApp({
     },
     startPolling() {
       this.stopPolling();
+      if (this.session.status === "expired") return;
       this.pollTimer = setInterval(this.pollSession, 2000);
       this.pollSession();
     },
@@ -483,12 +485,12 @@ const screenApp = createApp({
       this.pollTimer = null;
     },
     async pollSession() {
-      if (!this.session.sessionId || this.busy || this.stage === "playing" || this.stage === "completed") return;
+      if (!this.session.sessionId || this.session.status === "expired" || this.busy || this.stage === "playing" || this.stage === "completed") return;
       const context = this.learningContext();
       const stage = this.stage;
       try {
         const data = await FenghaoApi.screenSession(context.sessionId, context.deviceToken);
-        if (!this.isCurrentLearningContext(context) || this.busy || this.stage !== stage) return;
+        if (!this.isCurrentLearningContext(context) || this.session.status === "expired" || this.busy || this.stage !== stage) return;
         if (data?.sessionId !== context.sessionId) throw new Error("会话响应不匹配，请重试。");
         this.session = Object.assign({}, this.session, data);
         if (data.status === "worker_identified") {
@@ -503,12 +505,17 @@ const screenApp = createApp({
           await this.finishAll(context);
         } else if (data.status === "expired") {
           this.error = "二维码已过期，请重新生成。";
+          this.stopPolling();
         } else if (data.status === "error") {
           this.error = data.errorMessage || "识别失败";
         }
       } catch (error) {
-        if (this.isCurrentLearningContext(context) && this.stage === stage) {
-          this.error = error.message || "会话轮询失败";
+        if (this.isCurrentLearningContext(context) && this.session.status !== "expired" && this.stage === stage) {
+          if (error.code === "ERR_QR_EXPIRED") {
+            this.session = Object.assign({}, this.session, { status: "expired" });
+            this.error = "二维码已过期，请重新生成。";
+            this.stopPolling();
+          } else this.error = error.message || "会话轮询失败";
         }
       }
     },
@@ -757,6 +764,7 @@ const screenApp = createApp({
       }
     },
     async clearAndRestart() {
+      if (!this.canUseScreen()) return;
       if (!this.session.sessionId) return this.createSession();
       this.sessionEpoch += 1;
       this.$refs.learningVideo?.pause();
@@ -775,7 +783,6 @@ const screenApp = createApp({
       } finally {
         if (this.isCurrentLearningContext(context)) {
           this.busy = false;
-          this.startPolling();
         }
       }
     },

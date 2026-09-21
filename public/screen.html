@@ -80,8 +80,8 @@
               </div>
               <div class="qr-frame">
                 <span class="scan-line"></span>
-                <img v-if="session.qrUrl" :src="session.qrUrl" alt="个人学习二维码" />
-                <div v-else class="qr-skeleton">二维码生成中</div>
+                <img v-if="session.qrUrl && session.status !== 'expired'" :src="session.qrUrl" alt="个人学习二维码" />
+                <div v-else class="qr-skeleton">{{ session.status === 'expired' ? '二维码已过期，请重新生成' : '二维码生成中' }}</div>
               </div>
               <p class="qr-caption">请使用丰浩工人端扫描二维码</p>
             </div>
@@ -463,6 +463,6 @@
     <script data-screen-runtime src="./vendor/vue.global.prod.js"></script>
     <script data-screen-runtime src="./api.js?v=6"></script>
     <script data-screen-runtime src="./screen-voice.js?v=4"></script>
-    <script data-screen-runtime src="./screen.js?v=15"></script>
+    <script data-screen-runtime src="./screen.js?v=16"></script>
   </body>
 </html>

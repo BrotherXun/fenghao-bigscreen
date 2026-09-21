@@ -122,14 +122,112 @@ test("学习二维码410过期保留访问授权，刷新和重新生成二维�
   assert.equal(f.screen.accessState, "active");
   assert.equal(f.screen.accessSession.accessSessionId, "A1");
   assert.equal(f.sessionStorage.get("fenghao-screen-access"), saved);
-  assert.match(f.screen.error, /ERR_QR_EXPIRED/);
+  assert.match(f.screen.error, /二维码已过期.*重新生成/);
+  assert.equal(f.screen.session.status, "expired");
+  assert.equal(f.screen.pollTimer, null);
   const refreshed = loadScreen(responses, { hash, sessionStorage: f.sessionStorage }); await mount(refreshed);
   assert.equal(refreshed.screen.accessState, "active");
   assert.equal(refreshed.screen.accessSession.accessSessionId, "A1");
+  assert.equal(refreshed.screen.session.status, "expired");
+  assert.equal(refreshed.screen.sessionStatusLabel, "二维码已过期");
+  assert.equal(refreshed.screen.displayExpireAt, "请重新生成二维码");
+  assert.equal(refreshed.screen.pollTimer, null);
+  assert.equal(refreshed.calls.filter(call => call.url.endsWith("/S1")).length, 1);
+  assert.equal(refreshed.calls.filter(call => call.method === "POST").length, 0);
   await refreshed.screen.resetSession();
   assert.equal(refreshed.screen.session.sessionId, "S2");
+  assert.equal(refreshed.screen.session.qrUrl, "/files/qr/screen-session-S2.png");
+  assert.equal(refreshed.screen.session.status, "waiting_scan");
+  assert.equal(refreshed.screen.error, "");
+  assert.equal(refreshed.screen.busy, false);
+  assert.notEqual(refreshed.screen.pollTimer, null);
   assert.equal(refreshed.screen.accessSession.accessSessionId, "A1");
   assert.equal(refreshed.calls.filter(call => call.url === ACCESS && call.method === "POST").length, 0);
+});
+
+for (const failure of ["503", "network"]) {
+  test(`重新生成二维码${failure}失败保留真实原因，用户重试成功且不重开授权`, async () => {
+    let failClear = true, qrExpired = false;
+    const errorMessage = failure === "503" ? "清空服务暂不可用" : "清空请求网络连接中断";
+    const f = loadScreen(call => {
+      if (call.url.endsWith("/S1/clear")) {
+        if (!failClear) return { sessionId: "S1", status: "cleared" };
+        if (failure === "network") throw new Error(errorMessage);
+        return { rawResponse: { ok: false, status: 503, json: async () => ({ success: false, code: "TEMPORARY_CLEAR_FAILURE", message: errorMessage }) } };
+      }
+      if (call.url.endsWith("/S1") && qrExpired) return rejection(410, "ERR_QR_EXPIRED");
+      if (call.url === "/api/v1/screen-sessions" && call.method === "POST") {
+        return { sessionId: "S2", status: "waiting_scan", qrUrl: "/files/qr/screen-session-S2.png" };
+      }
+      if (call.url.endsWith("/S2")) return { sessionId: "S2", status: "waiting_scan" };
+      return backend(call);
+    }, { hash });
+    await mount(f); await f.screen.startAccessSession();
+    await new Promise(resolve => setImmediate(resolve));
+    const saved = f.sessionStorage.get("fenghao-screen-access");
+    qrExpired = true;
+    await f.screen.resetSession();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(f.screen.error, errorMessage);
+    assert.equal(f.screen.pollTimer, null);
+    assert.equal(f.screen.busy, false);
+    assert.equal(f.screen.session.sessionId, "S1");
+    assert.equal(f.screen.accessState, "active");
+    assert.equal(f.sessionStorage.get("fenghao-screen-access"), saved);
+    assert.equal(f.calls.filter(call => call.url === "/api/v1/screen-sessions").length, 0);
+    failClear = false;
+    await f.screen.resetSession();
+    assert.equal(f.screen.session.sessionId, "S2");
+    assert.equal(f.screen.session.qrUrl, "/files/qr/screen-session-S2.png");
+    assert.equal(f.screen.error, "");
+    assert.equal(f.screen.busy, false);
+    assert.notEqual(f.screen.pollTimer, null);
+    assert.equal(f.calls.filter(call => call.url.endsWith("/S1/clear")).length, 2);
+    assert.equal(f.calls.filter(call => call.url === ACCESS && call.method === "POST").length, 1);
+    assert.equal(f.sessionStorage.get("fenghao-screen-access"), saved);
+  });
+}
+
+test("访问授权本地到期后重新生成二维码先进入授权门禁，不发送清空或创建请求", async () => {
+  const f = loadScreen(backend, { hash });
+  await mount(f); await f.screen.startAccessSession();
+  const before = f.calls.length;
+  f.screen.accessSession.expiresAt = new Date(Date.now() - 1000).toISOString();
+  await f.screen.resetSession();
+  assert.equal(f.screen.accessState, "expired");
+  assert.equal(f.screen.deviceToken, "");
+  assert.equal(f.screen.pollTimer, null);
+  assert.equal(f.calls.length, before);
+});
+
+test("状态接口返回expired停止轮询，迟到的旧响应不能恢复过期二维码", async () => {
+  const stale = deferred();
+  let requests = 0;
+  const f = loadScreen(() => ++requests === 1 ? stale.promise : { sessionId: "S1", status: "expired" });
+  f.screen.deviceId = "D1"; f.screen.deviceToken = "synthetic-runtime";
+  f.screen.session = { sessionId: "S1" }; f.screen.stage = "waiting";
+  f.screen.startPolling();
+  await f.screen.pollSession();
+  assert.equal(f.screen.session.status, "expired");
+  assert.equal(f.screen.pollTimer, null);
+  stale.resolve({ sessionId: "S1", status: "waiting_scan", qrUrl: "/files/qr/old.png" });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(f.screen.session.status, "expired");
+  assert.equal(f.screen.session.qrUrl, undefined);
+  await f.screen.pollSession();
+  assert.equal(requests, 2);
+});
+
+test("清空返回真正的授权到期时进入门禁，不继续创建二维码或自动重开授权", async () => {
+  const f = loadScreen(call => call.url.endsWith("/S1/clear") ? rejection(410, "ERR_SCREEN_ACCESS_EXPIRED") : backend(call), { hash });
+  await mount(f); await f.screen.startAccessSession();
+  const before = f.calls.length;
+  await f.screen.resetSession();
+  assert.equal(f.screen.accessState, "expired");
+  assert.equal(f.screen.deviceToken, "");
+  assert.equal(f.screen.pollTimer, null);
+  assert.equal(f.calls.length, before + 1);
+  assert.equal(f.calls.at(-1).url, "/api/v1/screen-sessions/S1/clear");
 });
 
 for (const [status, code] of [[502, "PROXY_ERROR"], [503, "device_auth_unavailable"]]) {
