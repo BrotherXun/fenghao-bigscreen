@@ -305,7 +305,7 @@ const server = http.createServer(async (request, response) => {
       mode: assistantConfigured() ? "volcengine" : "unconfigured",
       agent: "networked-qa",
       speech: speechConfigured(),
-      speaker: process.env.VOLC_TTS_SPEAKER || "zh_male_liangsangmengzai_uranus_bigtts",
+      speaker: process.env.VOLC_TTS_SPEAKER || "zh_male_lanyinmianbao_uranus_bigtts",
     });
     return;
   }

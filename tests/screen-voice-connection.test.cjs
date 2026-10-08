@@ -92,8 +92,8 @@ test("问答默认展示，进入和重新进入均需用户点击才开启聆�
   assert.equal(startCalls, 1);
 });
 
-test("语音播报默认使用亮嗓萌仔音色", () => {
-  const speaker = "zh_male_liangsangmengzai_uranus_bigtts";
+test("语音播报默认使用指定的 lanyinmianbao 音色", () => {
+  const speaker = "zh_male_lanyinmianbao_uranus_bigtts";
   assert.match(serverSource, new RegExp(speaker));
   assert.equal(voiceBridgeSource.match(new RegExp(speaker, "g"))?.length, 2);
   assert.doesNotMatch(`${serverSource}\n${voiceBridgeSource}`, /zh_male_m191_uranus_bigtts/);

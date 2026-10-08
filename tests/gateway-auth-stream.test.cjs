@@ -294,7 +294,7 @@ test('TTS begin and completion carry the same request ID around real binary audi
 });
 
 for (const [name, settings, expectedSpeaker, expectedCluster] of [
-  ['default liangsangmengzai voice', {}, 'zh_male_liangsangmengzai_uranus_bigtts', 'volcano_tts'],
+  ['default lanyinmianbao voice', {}, 'zh_male_lanyinmianbao_uranus_bigtts', 'volcano_tts'],
   ['explicit deployment overrides', { speaker: 'test-custom-speaker', cluster: 'test-custom-cluster', speedRatio: '1.4' }, 'test-custom-speaker', 'test-custom-cluster'],
 ]) {
   test(`TTS ${name} agrees across status, hello and the actual synthesis request`, async t => {
