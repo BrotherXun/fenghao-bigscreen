@@ -121,16 +121,18 @@ test("并行连接等待共享认证结果，不提前视为已连接", async ()
 });
 
 test("文字播报可单独连接和认证且不申请麦克风", async () => {
-  const h = voiceHarness();
-  const pending = h.voice.beginSpeech(1.3);
-  assert.equal(h.sockets.length, 1);
-  const ws = h.sockets[0]; ws.open();
-  assert.equal(ws.sent.length, 1);
-  ws.message({ type: "authenticated" });
-  assert.equal(await pending, true);
-  assert.equal(h.micCalls(), 0);
-  assert.equal(ws.sent[1].type, "tts_start");
-  assert.equal(ws.sent[1].speedRatio, 1.3);
+  for (const speedRatio of [undefined, 1.3]) {
+    const h = voiceHarness();
+    const pending = h.voice.beginSpeech(speedRatio);
+    assert.equal(h.sockets.length, 1);
+    const ws = h.sockets[0]; ws.open();
+    assert.equal(ws.sent.length, 1);
+    ws.message({ type: "authenticated" });
+    assert.equal(await pending, true);
+    assert.equal(h.micCalls(), 0);
+    assert.equal(ws.sent[1].type, "tts_start");
+    assert.equal(ws.sent[1].speedRatio, speedRatio ?? 1);
+  }
 });
 
 test("认证等待有超时并停止语音启动", async () => {

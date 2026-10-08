@@ -16,7 +16,7 @@ const TTS_SAMPLE_RATE = 24000;
 function normaliseSpeedRatio(value, fallback) {
   const requested = Number(value);
   const configured = Number(fallback);
-  const ratio = Number.isFinite(requested) ? requested : (Number.isFinite(configured) ? configured : 1.2);
+  const ratio = Number.isFinite(requested) ? requested : (Number.isFinite(configured) ? configured : 1.0);
   return Math.round(Math.min(1.6, Math.max(0.8, ratio)) * 10) / 10;
 }
 

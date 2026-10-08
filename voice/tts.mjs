@@ -52,7 +52,7 @@ export class TtsSession {
     this.closed = false;
     this.finishRequested = false;
     const requestedSpeed = Number(options.speedRatio);
-    this.speedRatio = Number.isFinite(requestedSpeed) ? requestedSpeed : 1.2;
+    this.speedRatio = Number.isFinite(requestedSpeed) ? requestedSpeed : 1.0;
     this.onAudio = options.onAudio || (() => {});
     this.onError = options.onError || (() => {});
     this.onFinish = options.onFinish || (() => {});

@@ -73,6 +73,7 @@ test("问答默认展示，进入和重新进入均需用户点击才开启聆�
   );
 
   assert.equal(screen.assistantOpen, true);
+  assert.equal(screen.assistantSpeechRate, 1);
   await screen.openAssistant();
   assert.equal(screen.assistantOpen, true);
   assert.equal(screen.assistantViewMode, "voice");
@@ -84,7 +85,9 @@ test("问答默认展示，进入和重新进入均需用户点击才开启聆�
 
   screen.closeAssistant();
   assert.equal(stopCalls, 1);
+  screen.assistantSpeechRate = 1.2;
   await screen.openAssistant();
+  assert.equal(screen.assistantSpeechRate, 1.2);
   assert.equal(screen.assistantVoiceListening, false);
   assert.equal(startCalls, 1);
 });
@@ -130,8 +133,8 @@ test("语音模式使用蓝色机器人，并保留思考动作和播报浮动�
   assert.match(screenCss, /\.assistant-voice-actions\s*\{[^}]*justify-content:\s*center/);
   assert.doesNotMatch(screenCss, /assistant-signal-surface[^}]*translateX\(-5%\)/);
   assert.match(screenHtml, /screen\.css\?v=19/);
-  assert.match(screenHtml, /screen\.js\?v=17/);
-  assert.match(screenHtml, /screen-voice\.js\?v=5/);
+  assert.match(screenHtml, /screen\.js\?v=18/);
+  assert.match(screenHtml, /screen-voice\.js\?v=6/);
   assert.doesNotMatch(screenHtml, /assistant-voice-orb|assistant-signal-aura|assistant-signal-orbit|assistant-signal-points/);
   assert.doesNotMatch(screenCss, /assistant-orb-breathe|assistant-aura-pulse|assistant-orbit|assistant-point/);
   assert.equal(robotCharacter.readUInt32BE(0), 0x89504e47);
@@ -160,13 +163,15 @@ test("取消握手中的识别或合成不会提前关闭 WebSocket", async () =
   assert.equal(closeCalls, 0);
 });
 
-test("语音合成请求携带所选语速", async () => {
+test("语音合成请求默认正常语速并携带手动所选语速", async () => {
   const { TtsSession } = await import(pathToFileURL(path.join(voiceDir, "tts.mjs")).href);
-  const session = new TtsSession({ appId: "app", accessToken: "token", speaker: "speaker", speedRatio: 1.4 });
-  const frame = session.buildRequest("请停止作业");
-  const size = frame.readUInt32BE(4);
-  const payload = JSON.parse(gunzipSync(frame.subarray(8, 8 + size)).toString("utf8"));
-  assert.equal(payload.audio.speed_ratio, 1.4);
+  for (const speedRatio of [undefined, 1.4]) {
+    const session = new TtsSession({ appId: "app", accessToken: "token", speaker: "speaker", speedRatio });
+    const frame = session.buildRequest("请停止作业");
+    const size = frame.readUInt32BE(4);
+    const payload = JSON.parse(gunzipSync(frame.subarray(8, 8 + size)).toString("utf8"));
+    assert.equal(payload.audio.speed_ratio, speedRatio ?? 1);
+  }
 });
 
 test("播报被打断时会缓存首段语音，待识别就绪后按顺序发送", async () => {

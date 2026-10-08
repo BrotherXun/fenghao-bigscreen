@@ -64,7 +64,7 @@ const screenApp = createApp({
       assistantSpeechConfigured: false,
       assistantSpeechEnabled: false,
       assistantSpeakReplies: true,
-      assistantSpeechRate: 1.2,
+      assistantSpeechRate: 1.0,
       assistantVoice: null,
       assistantVoiceState: "idle",
       assistantVoiceStatus: "语音待命",

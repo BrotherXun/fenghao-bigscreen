@@ -667,7 +667,7 @@
           if (generation === speechGeneration) { awaitingTtsEnd = false; emitState("idle"); }
           return false;
         }
-        send({ type: "tts_start", requestId: ttsRequestId, speedRatio: Number(speedRatio) || 1.2 });
+        send({ type: "tts_start", requestId: ttsRequestId, speedRatio: Number(speedRatio) || 1.0 });
         ttsReadyTimer = setTimeout(function () {
           if (generation !== speechGeneration || ttsReady) return;
           resetTtsBuffer();

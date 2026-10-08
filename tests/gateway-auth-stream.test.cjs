@@ -71,6 +71,7 @@ async function fixture(t, settings = {}) {
       VOLC_BOT_ID: 'test-bot', VOLC_API_KEY: 'test-server-key', VOLC_AGENT_ENDPOINT: upstream + '/agent',
       VOLC_SPEECH_APP_ID: 'test-speech-app', VOLC_SPEECH_ACCESS_TOKEN: 'test-server-speech-key',
       VOLC_TTS_SPEAKER: settings.speaker || '', VOLC_TTS_CLUSTER: settings.cluster || '',
+      VOLC_TTS_SPEED_RATIO: settings.speedRatio,
       VOLC_ASR_ENDPOINT: speechEndpoint,
       VOLC_TTS_ENDPOINT: speechEndpoint },
   });
@@ -294,7 +295,7 @@ test('TTS begin and completion carry the same request ID around real binary audi
 
 for (const [name, settings, expectedSpeaker, expectedCluster] of [
   ['default liangsangmengzai voice', {}, 'zh_male_liangsangmengzai_uranus_bigtts', 'volcano_tts'],
-  ['explicit deployment overrides', { speaker: 'test-custom-speaker', cluster: 'test-custom-cluster' }, 'test-custom-speaker', 'test-custom-cluster'],
+  ['explicit deployment overrides', { speaker: 'test-custom-speaker', cluster: 'test-custom-cluster', speedRatio: '1.4' }, 'test-custom-speaker', 'test-custom-cluster'],
 ]) {
   test(`TTS ${name} agrees across status, hello and the actual synthesis request`, async t => {
     const f = await fixture(t, { ...settings, ttsReply: true });
@@ -317,6 +318,7 @@ for (const [name, settings, expectedSpeaker, expectedCluster] of [
     assert.equal(request.app.cluster, expectedCluster);
     assert.equal(request.audio.encoding, 'pcm');
     assert.equal(request.audio.rate, 24000);
+    assert.equal(request.audio.speed_ratio, Number(settings.speedRatio ?? 1));
     assert.ok(!messages.some(m => m.type === 'error'));
   });
 }
