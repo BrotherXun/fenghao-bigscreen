@@ -12,9 +12,8 @@ const screenHtml = fs.readFileSync(path.join(__dirname, "../public/screen.html")
 const screenCss = fs.readFileSync(path.join(__dirname, "../public/screen.css"), "utf8");
 const serverSource = fs.readFileSync(path.join(__dirname, "../server.cjs"), "utf8");
 const voiceBridgeSource = fs.readFileSync(path.join(__dirname, "../voice/bridge.mjs"), "utf8");
-const speakingCharacterPath = path.join(__dirname, "../public/assets/safety-assistant-cartoon-idle-v2.png");
-const thinkingCharacterPath = path.join(__dirname, "../public/assets/safety-assistant-cartoon-thinking-v2.png");
-const speakingLoopPath = path.join(__dirname, "../public/assets/safety-assistant-cartoon-speaking-v2.webm");
+const robotCharacterPath = path.join(__dirname, "../public/assets/safety-assistant-robot-idle-v1.png");
+const speakingLoopPath = path.join(__dirname, "../public/assets/safety-assistant-robot-speaking-v1.webm");
 
 function loadScreen(fetchImpl, createVoice) {
   let options;
@@ -97,15 +96,14 @@ test("语音播报默认使用成熟姐姐音色", () => {
   assert.doesNotMatch(`${serverSource}\n${voiceBridgeSource}`, /zh_male_m191_uranus_bigtts/);
 });
 
-test("语音模式使用戴安全帽的卡通安全员，并用思考和讲解动作区分状态", () => {
-  const speakingCharacter = fs.readFileSync(speakingCharacterPath);
-  const thinkingCharacter = fs.readFileSync(thinkingCharacterPath);
+test("语音模式使用蓝色机器人，并保留思考动作和播报浮动循环", () => {
+  const robotCharacter = fs.readFileSync(robotCharacterPath);
   const speakingLoop = fs.readFileSync(speakingLoopPath);
-  assert.match(screenHtml, /assets\/safety-assistant-cartoon-idle-v2\.png/);
-  assert.match(screenHtml, /assets\/safety-assistant-cartoon-thinking-v2\.png/);
+  assert.equal(screenHtml.match(/assets\/safety-assistant-robot-idle-v1\.png/g)?.length, 3);
+  assert.doesNotMatch(`${screenHtml}\n${screenCss}\n${screenSource}`, /safety-assistant-(?:cartoon|woman)-/);
   assert.match(screenHtml, /width="660" height="720"/);
   assert.match(screenHtml, /ref="assistantSpeakingVideo"[^>]*muted[^>]*loop[^>]*playsinline/);
-  assert.match(screenHtml, /assets\/safety-assistant-cartoon-speaking-v2\.webm/);
+  assert.match(screenHtml, /assets\/safety-assistant-robot-speaking-v1\.webm/);
   assert.match(screenHtml, /assistant-mascot-figure/);
   assert.match(screenHtml, /assistant-mascot-pose-speaking/);
   assert.match(screenHtml, /assistant-mascot-pose-thinking/);
@@ -135,11 +133,8 @@ test("语音模式使用戴安全帽的卡通安全员，并用思考和讲解�
   assert.match(screenHtml, /screen\.js\?v=16/);
   assert.doesNotMatch(screenHtml, /assistant-voice-orb|assistant-signal-aura|assistant-signal-orbit|assistant-signal-points/);
   assert.doesNotMatch(screenCss, /assistant-orb-breathe|assistant-aura-pulse|assistant-orbit|assistant-point/);
-  assert.equal(speakingCharacter.readUInt32BE(0), 0x89504e47);
-  assert.equal(speakingCharacter[25], 6);
-  assert.equal(thinkingCharacter.readUInt32BE(0), 0x89504e47);
-  assert.equal(thinkingCharacter[25], 6);
-  assert.notEqual(thinkingCharacter.length, speakingCharacter.length);
+  assert.equal(robotCharacter.readUInt32BE(0), 0x89504e47);
+  assert.equal(robotCharacter[25], 6);
   assert.equal(speakingLoop.subarray(0, 4).toString("hex"), "1a45dfa3");
 });
 
