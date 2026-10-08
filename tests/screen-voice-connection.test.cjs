@@ -89,8 +89,8 @@ test("问答默认展示，进入和重新进入均需用户点击才开启聆�
   assert.equal(startCalls, 1);
 });
 
-test("语音播报默认使用成熟姐姐音色", () => {
-  const speaker = "ICL_uranus_zh_female_chengshujiejie_tob";
+test("语音播报默认使用天才童声音色", () => {
+  const speaker = "zh_male_tiancaitongsheng_mars_bigtts";
   assert.match(serverSource, new RegExp(speaker));
   assert.equal(voiceBridgeSource.match(new RegExp(speaker, "g"))?.length, 2);
   assert.doesNotMatch(`${serverSource}\n${voiceBridgeSource}`, /zh_male_m191_uranus_bigtts/);
@@ -129,8 +129,9 @@ test("语音模式使用蓝色机器人，并保留思考动作和播报浮动�
   assert.match(screenCss, /\.assistant-signal-copy\s*\{[^}]*text-align:\s*center/);
   assert.match(screenCss, /\.assistant-voice-actions\s*\{[^}]*justify-content:\s*center/);
   assert.doesNotMatch(screenCss, /assistant-signal-surface[^}]*translateX\(-5%\)/);
-  assert.match(screenHtml, /screen\.css\?v=18/);
-  assert.match(screenHtml, /screen\.js\?v=16/);
+  assert.match(screenHtml, /screen\.css\?v=19/);
+  assert.match(screenHtml, /screen\.js\?v=17/);
+  assert.match(screenHtml, /screen-voice\.js\?v=5/);
   assert.doesNotMatch(screenHtml, /assistant-voice-orb|assistant-signal-aura|assistant-signal-orbit|assistant-signal-points/);
   assert.doesNotMatch(screenCss, /assistant-orb-breathe|assistant-aura-pulse|assistant-orbit|assistant-point/);
   assert.equal(robotCharacter.readUInt32BE(0), 0x89504e47);

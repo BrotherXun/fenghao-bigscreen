@@ -141,7 +141,7 @@ class VoiceConnection {
       ...credentials(this.env),
       cluster: this.env.VOLC_TTS_CLUSTER || "volcano_tts",
       endpoint: this.env.VOLC_TTS_ENDPOINT,
-      speaker: this.env.VOLC_TTS_SPEAKER || "ICL_uranus_zh_female_chengshujiejie_tob",
+      speaker: this.env.VOLC_TTS_SPEAKER || "zh_male_tiancaitongsheng_mars_bigtts",
       format: "pcm",
       sampleRate: TTS_SAMPLE_RATE,
       speedRatio: normaliseSpeedRatio(speedRatio, this.env.VOLC_TTS_SPEED_RATIO),
@@ -292,7 +292,7 @@ export function attachVoiceBridge(server, env, access) {
       type: "hello",
       asrSampleRate: ASR_SAMPLE_RATE,
       ttsSampleRate: TTS_SAMPLE_RATE,
-      speaker: env.VOLC_TTS_SPEAKER || "ICL_uranus_zh_female_chengshujiejie_tob"
+      speaker: env.VOLC_TTS_SPEAKER || "zh_male_tiancaitongsheng_mars_bigtts"
     });
 
     socket.on("message", (data, isBinary) => {

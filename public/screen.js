@@ -171,7 +171,7 @@ const screenApp = createApp({
       const lastUserMessage = [...this.assistantMessages].reverse().find((item) => item.role === "user" && item.content);
       if (this.voicePresentationState === "ready") return "开始聆听后，识别内容会显示在这里。";
       if (this.voicePresentationState === "thinking") return lastUserMessage ? `“${lastUserMessage.content}”` : "正在等待语音问题。";
-      if (this.voicePresentationState === "speaking") return this.voiceLatestAnswer || "正在播报关键安全动作。";
+      if (this.voicePresentationState === "speaking") return window.FenghaoAssistantText.stripBoldMarkers(this.voiceLatestAnswer) || "正在播报关键安全动作。";
       if (this.assistantVoiceState === "recording" && this.assistantVoiceStatus) return this.assistantVoiceStatus;
       return lastUserMessage ? `“${lastUserMessage.content}”` : "请直接说出施工或工程安全问题。";
     },

@@ -4,6 +4,7 @@ const http = require('node:http');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { once } = require('node:events');
+const { gunzipSync } = require('node:zlib');
 const { WebSocket, WebSocketServer } = require('ws');
 
 const deviceHeaders = { 'X-Screen-Device-ID': 'D1', 'X-Screen-Device-Token': 'test-device-token' };
@@ -11,7 +12,7 @@ const question = { messages: [{ role: 'user', content: '如何安全使用脚手
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function fixture(t, settings = {}) {
-  const stats = { agent: 0, voice: 0, closed: 0, authorized: 0, voiceAttempts: 0 };
+  const stats = { agent: 0, voice: 0, closed: 0, authorized: 0, voiceAttempts: 0, ttsRequests: [] };
   let revoked = false;
   let sessionExpiresAt;
   const backend = http.createServer((req, res) => {
@@ -44,7 +45,9 @@ async function fixture(t, settings = {}) {
     } });
   voice.on('connection', socket => {
     stats.voice++; socket.on('error', () => {});
-    if (settings.ttsReply) socket.on('message', () => {
+    if (settings.ttsReply) socket.on('message', data => {
+      const payloadSize = data.readUInt32BE(4);
+      stats.ttsRequests.push(JSON.parse(gunzipSync(data.subarray(8, 8 + payloadSize))));
       const frame = Buffer.alloc(14);
       frame.set([0x11, 0xb1, 0, 0]); frame.writeInt32BE(-1, 4); frame.writeUInt32BE(2, 8);
       frame.writeInt16LE(1234, 12); socket.send(frame);
@@ -67,6 +70,7 @@ async function fixture(t, settings = {}) {
       FENGHAO_ASSISTANT_TIMEOUT_MS: String(settings.timeout || 2000), FENGHAO_VOICE_AUTH_TIMEOUT_MS: '150',
       VOLC_BOT_ID: 'test-bot', VOLC_API_KEY: 'test-server-key', VOLC_AGENT_ENDPOINT: upstream + '/agent',
       VOLC_SPEECH_APP_ID: 'test-speech-app', VOLC_SPEECH_ACCESS_TOKEN: 'test-server-speech-key',
+      VOLC_TTS_SPEAKER: settings.speaker || '', VOLC_TTS_CLUSTER: settings.cluster || '',
       VOLC_ASR_ENDPOINT: speechEndpoint,
       VOLC_TTS_ENDPOINT: speechEndpoint },
   });
@@ -287,6 +291,35 @@ test('TTS begin and completion carry the same request ID around real binary audi
   assert.equal(Buffer.concat(audio).readInt16LE(), 1234);
   assert.ok(!messages.some(m => m.type === 'error'));
 });
+
+for (const [name, settings, expectedSpeaker, expectedCluster] of [
+  ['default child voice', {}, 'zh_male_tiancaitongsheng_mars_bigtts', 'volcano_tts'],
+  ['explicit deployment overrides', { speaker: 'test-custom-speaker', cluster: 'test-custom-cluster' }, 'test-custom-speaker', 'test-custom-cluster'],
+]) {
+  test(`TTS ${name} agrees across status, hello and the actual synthesis request`, async t => {
+    const f = await fixture(t, { ...settings, ttsReply: true });
+    const response = await fetch(f.origin + '/api/v1/assistant/status', { headers: deviceHeaders });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).speaker, expectedSpeaker);
+    const { socket, messages } = await f.connect();
+    await until(() => messages.some(m => m.type === 'hello'), 'voice hello');
+    assert.equal(messages.find(m => m.type === 'hello').speaker, expectedSpeaker);
+    socket.send(JSON.stringify({ type: 'authenticate', deviceId: 'D1', deviceToken: 'test-device-token' }));
+    await until(() => messages.some(m => m.type === 'authenticated'), 'auth acknowledgement');
+    socket.send(JSON.stringify({ type: 'tts_start', requestId: 'voice-config' }));
+    await until(() => messages.some(m => m.type === 'tts_begin'), 'TTS ready');
+    socket.send(JSON.stringify({ type: 'tts_text', requestId: 'voice-config', text: '请先戴好安全帽。' }));
+    socket.send(JSON.stringify({ type: 'tts_end', requestId: 'voice-config' }));
+    await until(() => messages.some(m => m.type === 'tts_end'), 'TTS completion');
+    assert.equal(f.stats.ttsRequests.length, 1);
+    const request = f.stats.ttsRequests[0];
+    assert.equal(request.audio.voice_type, expectedSpeaker);
+    assert.equal(request.app.cluster, expectedCluster);
+    assert.equal(request.audio.encoding, 'pcm');
+    assert.equal(request.audio.rate, 24000);
+    assert.ok(!messages.some(m => m.type === 'error'));
+  });
+}
 
 test('configured HTTPS IP origin is accepted through an internal HTTP reverse proxy', async t => {
   const publicOrigin = 'https://118.31.223.11:8443';

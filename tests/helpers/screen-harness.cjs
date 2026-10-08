@@ -35,6 +35,8 @@ function loadScreen(handleRequest = async () => ({}), config = {}) {
   const publicDir = path.join(__dirname, "../../public");
   vm.runInContext(fs.readFileSync(path.join(publicDir, "api.js"), "utf8"), sandbox);
   sandbox.FenghaoApi = sandbox.window.FenghaoApi;
+  vm.runInContext(fs.readFileSync(path.join(publicDir, "screen-voice.js"), "utf8"), sandbox);
+  sandbox.window.createVoice = config.createVoice;
   vm.runInContext(fs.readFileSync(path.join(publicDir, "screen.js"), "utf8"), sandbox);
   const screen = Object.assign(options.data(), { $refs: {}, $nextTick(fn) { return Promise.resolve().then(fn); } });
   for (const [name, method] of Object.entries(options.methods)) screen[name] = method.bind(screen);

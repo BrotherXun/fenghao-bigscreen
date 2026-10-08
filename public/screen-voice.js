@@ -22,13 +22,27 @@
   var BARGE_PREROLL_FRAMES = 8;    // 播报时仅保留最近 800ms 的疑似用户语音
   var MAX_PENDING_ASR_FRAMES = 30; // 识别握手期间最多缓存 3 秒，避免弱网下无限增长
 
+  function stripBoldMarkers(value) {
+    return String(value || "").replace(/\*\*([^*]*)\*\*/g, "$1");
+  }
+
+  function completeBoldPrefixLength(text) {
+    var markers = /\*\*|\*$/g;
+    var open = -1;
+    var match;
+    while ((match = markers.exec(text))) {
+      if (match[0] === "*") return open === -1 ? match.index : open;
+      open = open === -1 ? match.index : -1;
+    }
+    return open === -1 ? text.length : open;
+  }
+
   function stripMarkdownForSpeech(value) {
-    return String(value || "")
+    return stripBoldMarkers(value)
       .replace(/```[\s\S]*?```/g, " ")
       .replace(/`([^`]*)`/g, "$1")
       .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
       .replace(/\[ref_\d+\]/g, " ")
-      .replace(/\*\*([^*]*)\*\*/g, "$1")
       .replace(/^\s*[-*+]\s+/gm, "")
       .replace(/^\s*\d+\.\s+/gm, "")
       .replace(/^#{1,6}\s*/gm, "")
@@ -78,6 +92,7 @@
     var awaitingTtsEnd = false;
 
     var speechBuffer = "";
+    var pendingBoldText = "";
     var spokenFirstSentence = false;
     var bargeInAudio = [];
 
@@ -555,6 +570,14 @@
       ttsReadyTimer = null;
     }
 
+    function flushSpeechText(force) {
+      // 保留未闭合加粗和末尾单星号，避免标记跨 SSE 增量时先被句读送去合成。
+      var length = force ? pendingBoldText.length : completeBoldPrefixLength(pendingBoldText);
+      speechBuffer = stripMarkdownForSpeech(speechBuffer + pendingBoldText.slice(0, length));
+      pendingBoldText = pendingBoldText.slice(length);
+      flushSentences(force);
+    }
+
     function stopListening() {
       listeningGeneration += 1;
       listening = false;
@@ -568,6 +591,7 @@
       send({ type: "asr_abort" });
       awaitingTtsEnd = false;
       speechBuffer = "";
+      pendingBoldText = "";
       send({ type: "tts_cancel" });
       stopPlayback();
       releaseMic();
@@ -633,6 +657,7 @@
         resetTtsBuffer();
         ttsRequestId = String(generation);
         speechBuffer = "";
+        pendingBoldText = "";
         spokenFirstSentence = false;
         awaitingTtsEnd = true;
         stopPlayback();
@@ -658,17 +683,15 @@
         if (!awaitingTtsEnd) {
           return;
         }
-        // 先清洗再切句：markdown 会跨增量到达，必须等它拼完整才能安全剥离，
-        // 否则半截链接里的标点会被当成句末，网址也会被念出来。
-        speechBuffer = stripMarkdownForSpeech(speechBuffer + String(delta || ""));
-        flushSentences(false);
+        pendingBoldText += String(delta || "");
+        flushSpeechText(false);
       },
 
       endSpeech: function () {
         if (!awaitingTtsEnd) {
           return;
         }
-        flushSentences(true);
+        flushSpeechText(true);
         if (ttsReady) send({ type: "tts_end" });
         else ttsFinishPending = true;
       },
@@ -678,6 +701,7 @@
         resetTtsBuffer();
         awaitingTtsEnd = false;
         speechBuffer = "";
+        pendingBoldText = "";
         send({ type: "tts_cancel" });
         stopPlayback();
         if (listening) {
@@ -690,4 +714,5 @@
   }
 
   window.createVoice = createVoice;
+  window.FenghaoAssistantText = { stripBoldMarkers: stripBoldMarkers };
 }());

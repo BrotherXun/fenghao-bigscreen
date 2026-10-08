@@ -31,8 +31,68 @@ function voiceHarness() {
   };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../public/screen-voice.js"), "utf8"), sandbox);
   const voice = sandbox.window.createVoice({ deviceId: "D1", deviceToken: "synthetic-token", onError: (...args) => errors.push(args), onStateChange: state => states.push(state), onFinalTranscript() {}, onPartialTranscript() {} });
-  return { voice, sockets, timers, errors, states, micCalls: () => micCalls };
+  return { voice, sockets, timers, errors, states, window: sandbox.window, micCalls: () => micCalls };
 }
+
+async function speakingHarness() {
+  const h = voiceHarness();
+  const pending = h.voice.beginSpeech();
+  const ws = h.sockets[0]; ws.open(); ws.message({ type: "authenticated" }); await pending;
+  const start = ws.sent.find(message => message.type === "tts_start");
+  ws.message({ type: "tts_begin", requestId: start.requestId, sampleRate: 24000 });
+  return { ...h, ws, texts: () => ws.sent.filter(message => message.type === "tts_text").map(message => message.text) };
+}
+
+test("流式加粗跨数据片段和句读时不会把星号发给语音合成", async () => {
+  const h = await speakingHarness();
+  for (const chunk of ["如果是 *", "*钢筋绑扎，", "先检查防护。", "*", "* 然后作业。"])
+    h.voice.pushText(chunk);
+  h.voice.endSpeech();
+  assert.equal(h.texts().join(""), "如果是 钢筋绑扎，先检查防护。然后作业。");
+  assert.equal(h.texts().some(text => text.includes("*")), false);
+});
+
+test("流式加粗清理保留正文乘法、指数符号和普通技术名称", async () => {
+  const h = await speakingHarness();
+  for (const chunk of ["计算 2 * 3 = 6，", "2 ** 3 = 8。\n", "调用 __init__。"])
+    h.voice.pushText(chunk);
+  h.voice.endSpeech();
+  assert.equal(h.texts().join(""), "计算 2 * 3 = 6，2 ** 3 = 8。调用 __init__。");
+});
+
+test("逐字符到达的加粗回答与完整回答保持相同播报正文", async () => {
+  const text = "如果是 **钢筋绑扎，先检查防护。**然后作业。";
+  for (const chunks of [[text], [...text]]) {
+    const h = await speakingHarness();
+    chunks.forEach(chunk => h.voice.pushText(chunk));
+    h.voice.endSpeech();
+    assert.equal(h.texts().join(""), "如果是 钢筋绑扎，先检查防护。然后作业。");
+  }
+});
+
+test("等待加粗闭合不阻塞前面完整句子，取消后不串入下一轮", async () => {
+  const h = await speakingHarness();
+  h.voice.pushText("先停止作业。**再检查，");
+  assert.deepEqual(h.texts(), ["先停止作业。"]);
+  h.voice.cancelSpeech();
+  await h.voice.beginSpeech();
+  const start = h.ws.sent.filter(message => message.type === "tts_start").at(-1);
+  h.ws.message({ type: "tts_begin", requestId: start.requestId, sampleRate: 24000 });
+  h.voice.pushText("新回答。"); h.voice.endSpeech();
+  assert.deepEqual(h.texts(), ["先停止作业。", "新回答。"]);
+});
+
+test("前句已播报后独立到达的闭合标记在结束时不会泄漏", async () => {
+  const h = await speakingHarness();
+  h.voice.pushText("先停止作业。**");
+  assert.deepEqual(h.texts(), ["先停止作业。"]);
+  h.voice.pushText("钢筋绑扎");
+  h.voice.pushText("*");
+  h.voice.pushText("*");
+  h.voice.endSpeech();
+  assert.deepEqual(h.texts(), ["先停止作业。", "钢筋绑扎"]);
+  assert.equal(h.ws.sent.at(-1).type, "tts_end");
+});
 
 test("WS首条只发设备认证，等待认证通过才开麦与ASR", async () => {
   const h = voiceHarness();
