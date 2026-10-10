@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>丰浩大屏机 - 个人安全教育学习</title>
-    <link rel="stylesheet" href="./screen.css?v=19" />
+    <link rel="stylesheet" href="./screen.css?v=20" />
     <style>
       #screenApp[hidden], #screenStartup[hidden], #screenStartup [hidden] { display: none !important; }
     </style>
@@ -163,8 +163,7 @@
                 <div>
                   <p class="assistant-label">施工与工程安全</p>
                   <h2 id="assistantTitle">丰浩安全培训助手</h2>
-                  <p class="assistant-status" :class="'assistant-state-' + assistantConnectionMode"><i></i>{{ assistantConnection }}</p>
-                  <p v-if="accessMode && accessState === 'active'" class="assistant-status">{{ accessMessage }}</p>
+                  <div class="assistant-heading-spacer" aria-hidden="true"></div>
                 </div>
               </div>
               <div class="assistant-actions">

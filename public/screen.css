@@ -328,7 +328,8 @@ button { cursor: pointer; }
 .assistant-avatar, .assistant-message-avatar { display: grid; place-items: center; flex: 0 0 auto; border-radius: 10px; color: #fff; background: var(--blue); font-weight: 700; }
 .assistant-avatar { width: 44px; height: 44px; font-size: 18px; }
 .assistant-label { margin-bottom: 4px; font-size: 12px; }
-.assistant-heading h2 { color: var(--text); font-size: 22px; }
+.assistant-heading h2 { color: var(--text); font-size: 33px; }
+.assistant-heading-spacer { height: 40px; }
 .assistant-status { display: flex; align-items: center; gap: 7px; margin-top: 5px; color: var(--muted); font-size: 12px; }
 .assistant-status i { width: 7px; height: 7px; border-radius: 50%; background: var(--warning); }
 .assistant-state-online { color: var(--success); }.assistant-state-online i { background: var(--success); }
@@ -654,7 +655,7 @@ button { cursor: pointer; }
   .scan-note { align-items: flex-start; flex-direction: column; gap: 4px; }
   .stage-worker { align-items: flex-start; flex-direction: column; }.avatar { width: 82px; height: 82px; flex-basis: 82px; font-size: 34px; }.worker-info h2 { font-size: 30px; }
   .player { min-height: 410px; padding: 16px; }.player-actions .btn-ghost, .player-actions .btn-primary { flex: 1; padding: 0 10px; }
-  .assistant-heading h2 { font-size: 18px; }.assistant-avatar { width: 38px; height: 38px; }.assistant-voice-options { flex-wrap: wrap; }.assistant-rate { margin-left: auto; }
+  .assistant-heading h2 { font-size: 27px; }.assistant-avatar { width: 38px; height: 38px; }.assistant-voice-options { flex-wrap: wrap; }.assistant-rate { margin-left: auto; }
   .admin-login-header { padding: 24px 20px 20px; }.admin-login-form { padding: 22px 20px; }.admin-login-footnote { padding: 14px 20px 18px; }.admin-login-header h2 { font-size: 23px; }
   .admin-video-header { min-height: 70px; gap: 12px; padding: 14px 16px; }.admin-video-mark { width: 36px; height: 36px; flex-basis: 36px; font-size: 16px; }.admin-video-heading h2 { font-size: 18px; }.admin-video-heading p:last-child { max-width: 34vw; }.admin-video-header-actions .btn-ghost { display: none; }
   .admin-video-library-head { padding: 16px; }.admin-video-list { grid-template-columns: 1fr; }.admin-video-list-item { min-height: 65px; border-right: 0; }.admin-video-stage { padding: 18px 16px; }.admin-video-title-row { align-items: flex-start; flex-direction: column; gap: 10px; }.admin-video-title-actions { width: 100%; justify-content: space-between; }.admin-video-title-row h3 { font-size: 22px; }.admin-video-frame { border-radius: 10px; }.admin-video-details { grid-template-columns: 1fr 1fr; gap: 8px; }.admin-video-details div { padding: 11px; }.admin-video-message { min-height: 260px; padding: 28px 18px; }
