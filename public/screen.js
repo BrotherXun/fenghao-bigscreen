@@ -1211,7 +1211,7 @@ const screenApp = createApp({
       } else if (!this.assistantSpeechConfigured) {
         this.assistantVoiceHint = "语音未启用：服务端缺少语音识别与合成配置";
       } else {
-        this.assistantVoiceHint = "可连续语音提问；播报时直接开口即可打断";
+        this.assistantVoiceHint = "回答结束后可继续提问；点击“停止播报”可手动中断";
       }
     },
     setAssistantVoiceState(state) {
@@ -1220,7 +1220,7 @@ const screenApp = createApp({
         listening: "正在聆听，请开始提问",
         recording: "正在识别你的语音…",
         thinking: "正在生成回答…",
-        playing: "正在播报，可直接开口打断",
+        playing: "正在播报，结束后可继续提问",
       };
       this.assistantVoiceState = state || "idle";
       this.assistantVoiceStatus = labels[this.assistantVoiceState] || "语音待命";
@@ -1244,6 +1244,7 @@ const screenApp = createApp({
       this.assistantVoiceStarting = true;
       this.assistantVoiceStatus = "正在打开麦克风…";
       try {
+        if (this.assistantBusy) this.assistantVoice.beginResponse?.();
         const started = await this.assistantVoice.startListening();
         if (!this.assistantOpen) {
           if (started && this.assistantVoice.isListening()) this.assistantVoice.stopListening();
@@ -1262,6 +1263,7 @@ const screenApp = createApp({
       }
     },
     stopAssistantVoice() {
+      this.cancelAssistantRequest();
       this.assistantVoice?.stopListening?.();
       this.assistantVoiceListening = false;
       this.assistantVoiceState = "idle";
@@ -1269,6 +1271,7 @@ const screenApp = createApp({
     },
     cancelAssistantSpeech() {
       if (!this.assistantVoice) return;
+      this.cancelAssistantRequest();
       this.assistantSpeakingThisTurn = false;
       this.assistantVoice.cancelSpeech();
       this.assistantVoiceStatus = this.assistantVoice.isListening() ? "已停止播报，请继续提问" : "已停止播报";
@@ -1292,6 +1295,7 @@ const screenApp = createApp({
       this.assistantLiveAnswer = "";
       this.assistantLiveStatus = assistantMessage.processing;
       this.assistantBusy = true;
+      this.assistantVoice?.beginResponse?.();
       this.scrollAssistantToLatest();
       this.assistantSpeakingThisTurn = Boolean(this.assistantVoice && this.assistantSpeechEnabled && this.assistantSpeakReplies);
       try {
@@ -1345,6 +1349,7 @@ const screenApp = createApp({
           this.assistantAbort = null;
           this.assistantSpeakingThisTurn = false;
           this.assistantBusy = false;
+          this.assistantVoice?.endResponse?.();
           this.scrollAssistantToLatest();
           this.$nextTick(() => this.$refs.assistantInput?.focus());
         }
