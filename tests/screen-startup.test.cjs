@@ -58,7 +58,7 @@ test("mascot image, poster and video URLs are only bound after Vue mounts", () =
   assert.match(media[1], /:src="'\.\/assets\/safety-assistant-robot-idle-v1\.png'"/);
   assert.match(media[2], /:poster="'\.\/assets\/safety-assistant-robot-idle-v1\.png'"/);
   assert.match(media[2], /muted loop playsinline preload="metadata"/);
-  assert.match(media[3], /:src="'\.\/assets\/safety-assistant-robot-speaking-v1\.webm'"/);
+  assert.match(media[3], /:src="'\.\/assets\/safety-assistant-robot-speaking-v2\.webm'"/);
   for (const tag of media.slice(0, 2)) assert.match(tag, /width="660" height="720"/);
 });
 

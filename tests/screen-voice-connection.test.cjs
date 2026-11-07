@@ -13,7 +13,7 @@ const screenCss = fs.readFileSync(path.join(__dirname, "../public/screen.css"), 
 const serverSource = fs.readFileSync(path.join(__dirname, "../server.cjs"), "utf8");
 const voiceBridgeSource = fs.readFileSync(path.join(__dirname, "../voice/bridge.mjs"), "utf8");
 const robotCharacterPath = path.join(__dirname, "../public/assets/safety-assistant-robot-idle-v1.png");
-const speakingLoopPath = path.join(__dirname, "../public/assets/safety-assistant-robot-speaking-v1.webm");
+const speakingLoopPath = path.join(__dirname, "../public/assets/safety-assistant-robot-speaking-v2.webm");
 
 function loadScreen(fetchImpl, createVoice) {
   let options;
@@ -99,14 +99,14 @@ test("语音播报默认使用指定的 lanyinmianbao 音色", () => {
   assert.doesNotMatch(`${serverSource}\n${voiceBridgeSource}`, /zh_male_m191_uranus_bigtts/);
 });
 
-test("语音模式使用蓝色机器人，并保留思考动作和播报浮动循环", () => {
+test("语音模式使用蓝色机器人，并保留思考动作和播报动画循环", () => {
   const robotCharacter = fs.readFileSync(robotCharacterPath);
   const speakingLoop = fs.readFileSync(speakingLoopPath);
   assert.equal(screenHtml.match(/assets\/safety-assistant-robot-idle-v1\.png/g)?.length, 3);
   assert.doesNotMatch(`${screenHtml}\n${screenCss}\n${screenSource}`, /safety-assistant-(?:cartoon|woman)-/);
   assert.match(screenHtml, /width="660" height="720"/);
   assert.match(screenHtml, /ref="assistantSpeakingVideo"[^>]*muted[^>]*loop[^>]*playsinline/);
-  assert.match(screenHtml, /assets\/safety-assistant-robot-speaking-v1\.webm/);
+  assert.match(screenHtml, /assets\/safety-assistant-robot-speaking-v2\.webm/);
   assert.match(screenHtml, /assistant-mascot-figure/);
   assert.match(screenHtml, /assistant-mascot-pose-speaking/);
   assert.match(screenHtml, /assistant-mascot-pose-thinking/);
@@ -133,8 +133,8 @@ test("语音模式使用蓝色机器人，并保留思考动作和播报浮动�
   assert.match(screenCss, /\.assistant-voice-actions\s*\{[^}]*justify-content:\s*center/);
   assert.doesNotMatch(screenCss, /assistant-signal-surface[^}]*translateX\(-5%\)/);
   assert.match(screenHtml, /screen\.css\?v=20/);
-  assert.match(screenHtml, /screen\.js\?v=18/);
-  assert.match(screenHtml, /screen-voice\.js\?v=6/);
+  assert.match(screenHtml, /screen\.js\?v=20/);
+  assert.match(screenHtml, /screen-voice\.js\?v=7/);
   assert.doesNotMatch(screenHtml, /assistant-voice-orb|assistant-signal-aura|assistant-signal-orbit|assistant-signal-points/);
   assert.doesNotMatch(screenCss, /assistant-orb-breathe|assistant-aura-pulse|assistant-orbit|assistant-point/);
   assert.equal(robotCharacter.readUInt32BE(0), 0x89504e47);
@@ -174,7 +174,7 @@ test("语音合成请求默认正常语速并携带手动所选语速", async ()
   }
 });
 
-test("播报被打断时会缓存首段语音，待识别就绪后按顺序发送", async () => {
+test("手动停止播报后会缓存新首句，待识别就绪后按顺序发送", async () => {
   const source = fs.readFileSync(path.join(__dirname, "../public/screen-voice.js"), "utf8");
   const sockets = [];
   let worklet;
@@ -254,6 +254,7 @@ test("播报被打断时会缓存首段语音，待识别就绪后按顺序发�
   const ttsStart = socket.sent.filter((item) => typeof item === "string").map((item) => JSON.parse(item)).find((item) => item.type === "tts_start");
   socket.message(JSON.stringify({ type: "tts_begin", requestId: ttsStart.requestId, sampleRate: 24000 }));
   socket.message(new Int16Array([1, 2]).buffer);
+  voice.cancelSpeech();
   const firstUtterance = [0, 1, 2, 3].map(() => new Int16Array([17, 18]).buffer);
   firstUtterance.forEach((pcm) => worklet.port.onmessage({ data: { type: "audio", level: 0.2, pcm } }));
 

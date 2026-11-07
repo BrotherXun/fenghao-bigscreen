@@ -13,13 +13,10 @@
   var FRAME_MS = 100;
   var SILENCE_FRAMES = 6;          // 说完后 600ms 静音即判定收口
   var SPEECH_FRAMES_IDLE = 2;      // 聆听态连续 200ms 有声即认为开始说话
-  var SPEECH_FRAMES_PLAYING = 4;   // 播放态需连续 400ms，避免外放回声误触发
   var LEVEL_IDLE = 0.02;
-  var LEVEL_PLAYING = 0.06;
   var MIN_SPEECH_FRAMES = 3;       // 短于 300ms 的声音当噪声丢弃
   var FIRST_SENTENCE_MIN = 6;      // 首句最短切分长度，约 1.5 秒语音，短于此会显得断续
   var FORCE_SPLIT_AT = 60;         // 单句过长时强制在逗号处切开
-  var BARGE_PREROLL_FRAMES = 8;    // 播报时仅保留最近 800ms 的疑似用户语音
   var MAX_PENDING_ASR_FRAMES = 30; // 识别握手期间最多缓存 3 秒，避免弱网下无限增长
 
   function stripBoldMarkers(value) {
@@ -76,8 +73,10 @@
     var asrActive = false;      // 是否正在向识别服务送音频
     var asrReady = false;       // 火山识别连接已完成配置，可接收 PCM
     var asrStopPending = false; // 用户已说完，但识别握手尚未完成
+    var awaitingAsrFinal = false;
     var pendingAsrAudio = [];
     var continuous = true;
+    var responseActive = false; // 文字请求结束前，即使 TTS 故障也不接收下一轮
     var mode = "idle";          // idle | listening | recording | thinking | playing
 
     var speechRun = 0;
@@ -94,7 +93,6 @@
     var speechBuffer = "";
     var pendingBoldText = "";
     var spokenFirstSentence = false;
-    var bargeInAudio = [];
 
     function emitState(next) {
       if (mode !== next) {
@@ -130,6 +128,7 @@
     function resetAsrBuffer() {
       asrReady = false;
       asrStopPending = false;
+      awaitingAsrFinal = false;
       pendingAsrAudio = [];
     }
 
@@ -177,7 +176,7 @@
         if (index !== -1) {
           activeSources.splice(index, 1);
         }
-        if (!activeSources.length && awaitingTtsEnd === false && mode === "playing") {
+        if (!activeSources.length && awaitingTtsEnd === false) {
           finishPlayback();
         }
       };
@@ -199,6 +198,7 @@
     }
 
     function finishPlayback() {
+      if (responseActive || awaitingTtsEnd || activeSources.length) return;
       nextPlayTime = 0;
       if (listening && continuous) {
         resumeListening();
@@ -207,44 +207,38 @@
       }
     }
 
-    // ---------- 判停与打断 ----------
+    // ---------- 判停与回答期间的识别门控 ----------
 
-    function handleLevel(level, pcm) {
-      var playing = mode === "playing";
-      var threshold = playing ? LEVEL_PLAYING : LEVEL_IDLE;
-      var needed = playing ? SPEECH_FRAMES_PLAYING : SPEECH_FRAMES_IDLE;
+    function responsePending() {
+      return responseActive || awaitingTtsEnd || activeSources.length > 0;
+    }
 
-      if (level >= threshold) {
+    function pauseRecognition() {
+      var wasActive = asrActive || asrReady || asrStopPending;
+      asrActive = false;
+      resetAsrBuffer();
+      speechRun = 0;
+      silenceRun = 0;
+      speechFrames = 0;
+      hasSpeech = false;
+      if (asrRetryTimer) clearTimeout(asrRetryTimer);
+      asrRetryTimer = null;
+      if (wasActive) send({ type: "asr_abort" });
+    }
+
+    function handleLevel(level) {
+      // 工地背景人声不能中断本轮，也不能积累成下一轮的提问。
+      if (!asrActive || responsePending()) return;
+
+      if (level >= LEVEL_IDLE) {
         speechRun += 1;
         silenceRun = 0;
-        if (playing && pcm) {
-          bargeInAudio.push(pcm);
-          if (bargeInAudio.length > BARGE_PREROLL_FRAMES) {
-            bargeInAudio.shift();
-          }
-        }
       } else {
         silenceRun += 1;
         speechRun = 0;
-        if (playing) {
-          bargeInAudio = [];
-        }
       }
 
-      if (playing) {
-        // 播放期间检测到用户开口，立刻停嘴并转入新一轮聆听。
-        if (speechRun >= needed) {
-          bargeIn();
-          return true; // 当前帧已被写入打断预录音，不能重复发送。
-        }
-        return false;
-      }
-
-      if (!asrActive) {
-        return false;
-      }
-
-      if (speechRun >= needed && !hasSpeech) {
+      if (speechRun >= SPEECH_FRAMES_IDLE && !hasSpeech) {
         hasSpeech = true;
         emitState("recording");
       }
@@ -254,7 +248,6 @@
           closeUtterance();
         }
       }
-      return false;
     }
 
     function closeUtterance() {
@@ -270,6 +263,7 @@
         return;
       }
       if (asrReady) {
+        awaitingAsrFinal = true;
         send({ type: "asr_stop" });
       } else {
         asrStopPending = true;
@@ -277,30 +271,20 @@
       emitState("thinking");
     }
 
-    function bargeIn() {
-      var preRoll = bargeInAudio.slice();
-      bargeInAudio = [];
-      send({ type: "tts_cancel" });
-      stopPlayback();
-      awaitingTtsEnd = false;
-      speechGeneration += 1;
-      resetTtsBuffer();
-      if (handlers.onInterrupt) handlers.onInterrupt();
-      resumeListening(preRoll);
-    }
-
-    function resumeListening(preRoll) {
+    function resumeListening() {
+      if (responsePending() || asrActive) return;
       if (!listening || !connected) {
         emitState(listening ? "listening" : "idle");
         return;
       }
       asrReady = false;
       asrStopPending = false;
-      pendingAsrAudio = Array.isArray(preRoll) ? preRoll.slice(-MAX_PENDING_ASR_FRAMES) : [];
-      hasSpeech = pendingAsrAudio.length > 0;
+      awaitingAsrFinal = false;
+      pendingAsrAudio = [];
+      hasSpeech = false;
       speechRun = 0;
       silenceRun = 0;
-      speechFrames = pendingAsrAudio.length;
+      speechFrames = 0;
       asrActive = true;
       send({ type: "asr_start" });
       emitState(hasSpeech ? "recording" : "listening");
@@ -332,8 +316,8 @@
         if (!data || data.type !== "audio") {
           return;
         }
-        var consumedByBargeIn = handleLevel(data.level, data.pcm);
-        if (!consumedByBargeIn && asrActive) {
+        handleLevel(data.level);
+        if (asrActive && !responsePending()) {
           queueAsrAudio(data.pcm);
         }
       };
@@ -444,16 +428,19 @@
           ttsSampleRate = message.ttsSampleRate || 24000;
           break;
         case "asr_ready":
+          if (responsePending()) { send({ type: "asr_abort" }); break; }
           asrReady = true;
           flushAsrAudio();
           if (asrStopPending) {
             asrStopPending = false;
+            awaitingAsrFinal = true;
             send({ type: "asr_stop" });
           } else if (!asrActive) {
             send({ type: "asr_abort" });
           }
           break;
         case "asr_partial":
+          if (responsePending()) break;
           handlers.onPartialTranscript(message.text || "");
           break;
         case "asr_final":
@@ -470,7 +457,7 @@
           if (ttsFinishPending) { ttsFinishPending = false; send({ type: "tts_end" }); }
           break;
         case "tts_end":
-          if (message.requestId !== ttsRequestId) break;
+          if (message.requestId !== ttsRequestId || !awaitingTtsEnd) break;
           resetTtsBuffer();
           awaitingTtsEnd = false;
           if (!activeSources.length) {
@@ -478,10 +465,11 @@
           }
           break;
         case "error":
-          if (message.scope === "tts" && message.requestId !== ttsRequestId) break;
+          if (message.scope === "tts" && (message.requestId !== ttsRequestId || !awaitingTtsEnd)) break;
+          if (message.scope === "asr" && responsePending()) break;
           fail(message.scope, message.message, message);
           if (message.scope === "auth") { stopListening(); if (socket?.readyState === WebSocket.OPEN) socket.close(); }
-          if (message.scope === "tts") { resetTtsBuffer(); awaitingTtsEnd = false; stopPlayback(); }
+          if (message.scope === "tts") { resetTtsBuffer(); awaitingTtsEnd = false; stopPlayback(); finishPlayback(); }
           if (message.scope === "asr") {
             resetAsrBuffer();
             asrActive = false;
@@ -500,6 +488,7 @@
     }
 
     function handleFinalTranscript(text) {
+      if (responsePending() || !listening || !awaitingAsrFinal) return;
       var value = String(text || "").trim();
       resetAsrBuffer();
       asrActive = false;
@@ -581,13 +570,13 @@
     function stopListening() {
       listeningGeneration += 1;
       listening = false;
+      responseActive = false;
       asrActive = false;
       speechGeneration += 1;
       resetTtsBuffer();
       if (asrRetryTimer) clearTimeout(asrRetryTimer);
       asrRetryTimer = null;
       resetAsrBuffer();
-      bargeInAudio = [];
       send({ type: "asr_abort" });
       awaitingTtsEnd = false;
       speechBuffer = "";
@@ -646,6 +635,17 @@
 
       stopListening: stopListening,
 
+      beginResponse: function () {
+        responseActive = true;
+        pauseRecognition();
+        emitState("thinking");
+      },
+
+      endResponse: function () {
+        responseActive = false;
+        finishPlayback();
+      },
+
       // 在用户主动发送问题时调用，避免浏览器把首段播报当成非用户触发的自动播放。
       preparePlayback: function () {
         ensurePlaybackContext();
@@ -660,6 +660,7 @@
         pendingBoldText = "";
         spokenFirstSentence = false;
         awaitingTtsEnd = true;
+        pauseRecognition();
         stopPlayback();
         emitState("thinking");
         var ok = await connect();
@@ -697,6 +698,7 @@
       },
 
       cancelSpeech: function () {
+        responseActive = false;
         speechGeneration += 1;
         resetTtsBuffer();
         awaitingTtsEnd = false;
