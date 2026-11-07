@@ -216,6 +216,7 @@ const screenApp = createApp({
         const video = this.$refs.assistantSpeakingVideo;
         if (!video) return;
         if (state === "speaking") {
+          video.playbackRate = 1.25;
           video.currentTime = 0;
           const playback = video.play();
           if (playback && typeof playback.catch === "function") playback.catch(() => {});
