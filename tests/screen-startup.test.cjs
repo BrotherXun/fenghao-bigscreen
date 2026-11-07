@@ -6,7 +6,7 @@ const vm = require("node:vm");
 
 const publicDir = path.join(__dirname, "../public");
 const html = fs.readFileSync(path.join(publicDir, "screen.html"), "utf8");
-const runtimePaths = ["vendor/vue.global.prod.js", "api.js", "screen-voice.js", "screen.js"];
+const runtimePaths = ["vendor/vue.global.prod.js", "vendor/qrcode.min.js", "api.js", "screen-voice.js", "screen.js"];
 
 // This small DOM model exercises the real inline guard, not Vue rendering.
 // The companion local HTTP fixture lets a browser execute the unmodified Vue runtime.
@@ -62,7 +62,7 @@ test("mascot image, poster and video URLs are only bound after Vue mounts", () =
   for (const tag of media.slice(0, 2)) assert.match(tag, /width="660" height="720"/);
 });
 
-test("startup guard precedes the four original scripts in their dependency order", () => {
+test("startup guard precedes all runtime scripts in their dependency order", () => {
   const guardIndex = html.indexOf('id="screen-startup-guard"');
   assert.ok(guardIndex >= 0, "an inline guard must run before network-dependent scripts");
   const scripts = [...html.matchAll(/<script\b([^>]*)\bsrc="([^"]+)"[^>]*>/g)];

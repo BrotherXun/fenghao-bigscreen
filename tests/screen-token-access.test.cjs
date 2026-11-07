@@ -35,7 +35,7 @@ test("token链接预览不启动后端会话、问答或录音，也不使用旧
   assert.equal(f.historyCalls.length, 0, "保留片段链接供微信复制到其他电脑");
 });
 
-test("显式开始仅创建一次授权并沿用当前学习会话，不自动开麦", async () => {
+test("显式开始只创建一次授权；个人集中学习入口复用原学习会话，不自动开麦", async () => {
   const pending = deferred(); let voices = 0;
   const f = loadScreen(call => call.url === ACCESS ? pending.promise : backend(call), { hash, createVoice: () => { voices++; return { isAvailable: () => true }; } });
   await mount(f);
@@ -48,6 +48,8 @@ test("显式开始仅创建一次授权并沿用当前学习会话，不自动�
   pending.resolve(session()); await first;
   assert.equal(f.screen.accessState, "active");
   assert.equal(f.screen.deviceToken, "runtime-A1");
+  assert.equal(f.screen.session.sessionId, undefined, "开启设备不会自动创建或进入个人场次");
+  await f.screen.openPersonalLearning();
   assert.equal(f.screen.session.sessionId, "S1");
   assert.equal(f.calls.filter(c => c.method === "POST").length, 1);
   assert.equal(voices, 1);
@@ -57,6 +59,7 @@ test("显式开始仅创建一次授权并沿用当前学习会话，不自动�
 
 test("同页刷新只GET恢复，保留已签到学习状态并且不再次扣次", async () => {
   const f = loadScreen(backend, { hash }); await mount(f); await f.screen.startAccessSession();
+  await f.screen.openPersonalLearning();
   const refreshed = loadScreen(call => call.url.endsWith("/S1") ? { sessionId: "S1", status: "playing", videos: [{ videoId: "V1" }] } : backend(call), { sessionStorage: f.sessionStorage });
   await mount(refreshed);
   assert.equal(refreshed.calls[0].url, ACCESS + "/A1");
@@ -83,6 +86,7 @@ test("刷新从状态接口恢复服务端二维码地址，不重开授权或�
   }
   const first = loadScreen(responses, { hash });
   await mount(first); await first.screen.startAccessSession();
+  await first.screen.openPersonalLearning();
   assert.equal(first.screen.session.qrUrl, qrUrl);
   const refreshed = loadScreen(responses, { hash, sessionStorage: first.sessionStorage });
   await mount(refreshed); await refreshed.screen.pollSession();
@@ -117,6 +121,7 @@ test("学习二维码410过期保留访问授权，刷新和重新生成二维�
     return backend(call);
   }
   const f = loadScreen(responses, { hash }); await mount(f); await f.screen.startAccessSession();
+  await f.screen.openPersonalLearning();
   const saved = f.sessionStorage.get("fenghao-screen-access");
   qrExpired = true; await f.screen.pollSession();
   assert.equal(f.screen.accessState, "active");
@@ -163,6 +168,7 @@ for (const failure of ["503", "network"]) {
       return backend(call);
     }, { hash });
     await mount(f); await f.screen.startAccessSession();
+    await f.screen.openPersonalLearning();
     await new Promise(resolve => setImmediate(resolve));
     const saved = f.sessionStorage.get("fenghao-screen-access");
     qrExpired = true;
@@ -221,6 +227,7 @@ test("状态接口返回expired停止轮询，迟到的旧响应不能恢复过�
 test("清空返回真正的授权到期时进入门禁，不继续创建二维码或自动重开授权", async () => {
   const f = loadScreen(call => call.url.endsWith("/S1/clear") ? rejection(410, "ERR_SCREEN_ACCESS_EXPIRED") : backend(call), { hash });
   await mount(f); await f.screen.startAccessSession();
+  await f.screen.openPersonalLearning();
   const before = f.calls.length;
   await f.screen.resetSession();
   assert.equal(f.screen.accessState, "expired");

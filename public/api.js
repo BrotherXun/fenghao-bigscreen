@@ -1,6 +1,6 @@
 // 大屏专用 API；同源 Node 服务统一转发到 Java 后端。
 (function () {
-  async function request(path, deviceToken, method = "GET", body) {
+  async function request(path, deviceToken, method = "GET", body, signal) {
     const headers = { Accept: "application/json" };
     if (deviceToken) headers["X-Screen-Device-Token"] = deviceToken;
     if (body !== undefined) headers["Content-Type"] = "application/json";
@@ -8,8 +8,11 @@
       method,
       headers,
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(signal ? { signal } : {}),
     });
+    if (signal?.aborted) throw new Error("当前分发读取已取消。");
     const payload = await response.json().catch(() => null);
+    if (signal?.aborted) throw new Error("当前分发读取已取消。");
     if (!response.ok || payload?.success === false) {
       const error = new Error(payload?.message || "后端请求失败，请检查设备配置和服务连接。");
       error.status = response.status;
@@ -25,6 +28,7 @@
     createScreenAccessSession: (token, requestId) => request("/api/v1/screen/access-sessions", null, "POST", { token, requestId }),
     screenAccessSession: (id, token) => request("/api/v1/screen/access-sessions/" + encodeURIComponent(id), token),
     screenConfig: (id, token) => request("/api/v1/screen-devices/" + encodeURIComponent(id) + "/config", token),
+    screenVideoDispatch: (id, token, options) => request("/api/v1/screen-devices/" + encodeURIComponent(id) + "/video-dispatch", token, "GET", undefined, options?.signal),
     screenDeviceCommands: (id, token) => request("/api/v1/screen-devices/" + encodeURIComponent(id) + "/commands", token),
     ackScreenDeviceCommand: (id, commandId, token, body) => request("/api/v1/screen-devices/" + encodeURIComponent(id) + "/commands/" + encodeURIComponent(commandId) + "/ack", token, "POST", body),
     createScreenSession: (deviceId, token) => request("/api/v1/screen-sessions", token, "POST", { deviceId }),

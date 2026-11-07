@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>丰浩大屏机 - 个人安全教育学习</title>
-    <link rel="stylesheet" href="./screen.css?v=20" />
+    <link rel="stylesheet" href="./screen.css?v=21" />
     <style>
       #screenApp[hidden], #screenStartup[hidden], #screenStartup [hidden] { display: none !important; }
     </style>
@@ -48,7 +48,8 @@
               {{ adminSession ? '视频查看' : '项目管理员登录' }}
             </button>
             <button v-if="adminSession" class="btn-ghost" type="button" @click="logoutProjectAdmin">退出管理员</button>
-            <button class="btn-ghost" type="button" @click="resetSession" :disabled="busy">重新生成二维码</button>
+            <button class="btn-ghost" type="button" @click="openDispatchLearning">扫码学习</button>
+            <button v-if="stage !== 'dispatch'" class="btn-ghost" type="button" @click="resetSession" :disabled="busy">重新生成二维码</button>
           </div>
         </header>
 
@@ -69,6 +70,30 @@
             <div class="spinner"></div>
             <h2>正在初始化大屏机</h2>
             <p class="muted">获取设备配置与学习会话…</p>
+          </section>
+
+          <section v-else-if="stage === 'dispatch'" class="stage-scan stage-card" aria-label="现场视频扫码学习">
+            <div class="scan-qr-panel">
+              <div class="panel-eyebrow"><span>现场视频</span><strong>{{ videoDispatch ? '扫码到手机观看' : '等待分发' }}</strong></div>
+              <div class="qr-frame dispatch-qr-frame">
+                <div v-if="videoDispatch" ref="dispatchQr" class="dispatch-qr" aria-label="现场视频学习二维码"></div>
+                <div v-else class="qr-skeleton">{{ dispatchBusy ? '正在读取当前分发…' : '当前暂无有效分发' }}</div>
+              </div>
+              <p class="qr-caption">请使用丰浩工人端学习中心的“扫码学习”</p>
+            </div>
+            <div class="scan-copy">
+              <p class="section-hint">多人扫码 · 手机观看</p>
+              <h2>{{ videoDispatch?.title || '等待项目管理员下发视频' }}</h2>
+              <template v-if="videoDispatch">
+                <p class="muted lg">同一码供多人扫码，每人在手机完整观看，系统独立留存学习记录。</p>
+                <div class="dispatch-counts"><span><strong>{{ videoDispatch.participantCount || 0 }}</strong> 人参与</span><span><strong>{{ videoDispatch.completedCount || 0 }}</strong> 人已完成</span></div>
+                <div class="scan-note"><strong>视频时长</strong><span>{{ formatDispatchDuration(videoDispatch.video?.durationMs) }}</span></div>
+                <div class="scan-note"><strong>有效至</strong><span>{{ formatDispatchExpiry(videoDispatch.expiresAt) }}</span></div>
+              </template>
+              <p v-else class="muted lg">管理员可从管理后台下发，或登录本机“视频播放”选择视频后发布。</p>
+              <p v-if="dispatchError" class="banner banner-error" role="alert">{{ dispatchError }}</p>
+              <div class="dispatch-actions"><button class="btn-ghost" type="button" @click="pollVideoDispatch" :disabled="dispatchBusy">刷新当前分发</button><button class="btn-ghost" type="button" @click="openPersonalLearning">个人集中学习（原流程）</button></div>
+            </div>
           </section>
 
           <!-- 等待扫码 -->
@@ -167,7 +192,7 @@
                 </div>
               </div>
               <div class="assistant-actions">
-                <button class="btn-ghost assistant-nav-entry" type="button" @click="closeAssistant">扫码学习</button>
+                <button class="btn-ghost assistant-nav-entry" type="button" @click="openDispatchLearning">扫码学习</button>
                 <button class="btn-ghost assistant-nav-entry" type="button" @click="openAdminVideoCenter">视频播放</button>
                 <button class="btn-ghost" type="button" @click="toggleAssistantView">{{ assistantViewMode === 'voice' ? '查看对话记录' : '返回语音模式' }}</button>
                 <button v-if="assistantViewMode === 'chat'" class="btn-ghost" type="button" @click="resetAssistant" :disabled="assistantBusy">新建对话</button>
@@ -397,6 +422,14 @@
                       <div><dt>资源状态</dt><dd>{{ adminVideoStateLabel(adminSelectedVideo) }}</dd></div>
                     </dl>
                   </div>
+                  <section class="admin-dispatch-form" aria-label="分发当前视频到本机">
+                    <h4>分发当前视频到本机</h4>
+                    <p>同一码供多人在手机观看；发布会结束本机上一场分发，未完成者将无法继续，已有记录保留。</p>
+                    <div class="admin-dispatch-fields"><label>分发标题<input v-model="adminDispatchTitle" :placeholder="adminSelectedVideo.title" maxlength="200" :disabled="adminDispatchBusy" /></label><label>有效时间（小时）<input v-model.number="adminDispatchHours" type="number" min="1" max="168" step="1" :disabled="adminDispatchBusy" /></label></div>
+                    <p v-if="adminDispatchError" class="admin-video-playback-error" role="alert">{{ adminDispatchError }}</p>
+                    <p v-if="adminDispatchNotice" role="status">{{ adminDispatchNotice }}</p>
+                    <div class="dispatch-actions"><button class="btn-primary" type="button" @click="publishAdminVideoDispatch" :disabled="adminDispatchBusy || !isAdminVideoDispatchable(adminSelectedVideo)">{{ adminDispatchBusy ? '正在发布…' : '发布到本机' }}</button><button class="btn-ghost" type="button" @click="openDispatchLearning">查看当前分发码</button></div>
+                  </section>
                 </template>
               </section>
             </div>
@@ -413,7 +446,7 @@
         const title = document.getElementById("screenStartupTitle");
         const message = document.getElementById("screenStartupMessage");
         const retry = document.getElementById("screenStartupRetry");
-        const runtimeUrls = ["./vendor/vue.global.prod.js", "./api.js", "./screen-voice.js", "./screen.js"]
+        const runtimeUrls = ["./vendor/vue.global.prod.js", "./vendor/qrcode.min.js", "./api.js", "./screen-voice.js", "./screen.js"]
           .map((path) => new URL(path, window.location.href).href);
         let ready = false;
         let failed = false;
@@ -460,8 +493,9 @@
       })();
     </script>
     <script data-screen-runtime src="./vendor/vue.global.prod.js"></script>
-    <script data-screen-runtime src="./api.js?v=6"></script>
+    <script data-screen-runtime src="./vendor/qrcode.min.js"></script>
+    <script data-screen-runtime src="./api.js?v=8"></script>
     <script data-screen-runtime src="./screen-voice.js?v=7"></script>
-    <script data-screen-runtime src="./screen.js?v=19"></script>
+    <script data-screen-runtime src="./screen.js?v=22"></script>
   </body>
 </html>

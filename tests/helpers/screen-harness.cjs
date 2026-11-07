@@ -20,7 +20,7 @@ function loadScreen(handleRequest = async () => ({}), config = {}) {
     localStorage: { getItem(key) { return storage.get(key) || null; }, setItem(key, value) { storage.set(key, String(value)); }, removeItem(key) { storage.delete(key); } },
     sessionStorage: { getItem(key) { return sessionStorage.get(key) || null; }, setItem(key, value) { if (config.storageBlocked) throw new Error("Storage blocked"); sessionStorage.set(key, String(value)); }, removeItem(key) { sessionStorage.delete(key); } },
     setInterval(fn, delay) { const id = intervals.size + 1; intervals.set(id, { fn, delay }); return id; },
-    clearInterval(id) { intervals.delete(id); }, setTimeout, clearTimeout,
+    clearInterval(id) { intervals.delete(id); }, setTimeout: config.setTimeout || setTimeout, clearTimeout: config.clearTimeout || clearTimeout,
     window: { createVoice: config.createVoice },
     Vue: { createApp(value) { options = value; return { mount() {} }; } },
     async fetch(url, init = {}) {

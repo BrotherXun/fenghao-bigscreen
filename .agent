@@ -38,6 +38,7 @@ Node 是此大屏的服务端网关，不是 Java 业务后端。它提供静态
 - public/screen-voice.js、pcm-worklet.js：麦克风 PCM 采集、缓存、播放与语音状态。
 - public/assets/：当前蓝色机器人透明图片与播报浮动循环视频；历史人物素材保留但页面不再引用。
 - public/vendor/vue.global.prod.js：Vue 3.5.13，保留文件头 MIT 版权声明。
+- public/vendor/qrcode.min.js：本地 qrcodejs 二维码渲染，不向第三方服务发送分发令牌；许可证为同目录 qrcode-LICENSE.txt。
 - server.cjs：配置加载、静态服务、Java 代理、云问答转发、语音桥接启动。
 - voice/frame.mjs、asr.mjs、tts.mjs、bridge.mjs：语音协议、识别、合成和连接管理。
 - tests/：页面行为、语音协议、视频权限以及独立网关/API 验证。
@@ -52,6 +53,8 @@ Node 是此大屏的服务端网关，不是 Java 业务后端。它提供静态
 | 开启授权 | POST /api/v1/screen/access-sessions | Java；{token, requestId}，成功开启扣 1 次，重试幂等 |
 | 恢复授权 | GET /api/v1/screen/access-sessions/{id} | Java；需运行令牌，恢复不扣次 |
 | 设备配置 | GET /api/v1/screen-devices/{deviceId}/config | Java ScreenLearningController；需设备令牌 |
+| 现场视频分发 | GET /api/v1/screen-devices/{deviceId}/video-dispatch | Java；需有效运行令牌，只读取本机当前分发，不创建个人学习场次或扣授权次数 |
+| 管理员现场分发 | POST /api/v1/admin/screen-video-dispatches | Java；项目管理员 Bearer，deviceId/resourceId/title/validHours，向已开启的本机发布 |
 | 创建会话 | POST /api/v1/screen-sessions | Java；请求体 {deviceId} |
 | 会话轮询 | GET /api/v1/screen-sessions/{sessionId} | Java；等待扫码阶段约每 2 秒读取 |
 | 签到 | POST /api/v1/screen-sessions/{sessionId}/checkin | Java；工人确认开始学习 |
@@ -73,7 +76,9 @@ Node 是此大屏的服务端网关，不是 Java 业务后端。它提供静态
 ## 必须保留的交互约定
 
 - 首页默认安全问答，初次加载和重新进入都不自动开启聆听。用户点击“开始聆听”才调用麦克风。
-- 右上方“扫码学习”切换学习界面；“视频播放”进入项目管理员视频查看流程。
+- 右上方“扫码学习”优先显示当前现场视频分发码（screen-video:id:token），多人在手机观看并独立留档；仅展示视频标题、时长、有效时间及聚合人数，不展示逐人身份。“个人集中学习（原流程）”是独立次级入口，仍使用原单人签到与大屏播放流程；新进入终端不会自动创建个人场次。
+- “视频播放”进入项目管理员视频查看流程；仅 ACTIVE、READY 且具备服务端可信 durationMs 的视频可下发。设备会话未开启时先提示用户开启，不自动消费次数。
+- 当前现场分发读取有15秒截止，超时后可刷新重试；弹层打开或页面卸载中止读取，返回扫码页恢复轮询及到期计时，旧响应和旧超时不能覆盖新请求。
 - 打开问答时检查云服务状态，并与设备初始化独立进行；Java 不可用时问答页面仍可展示。
 - 关闭问答必须停止聆听/播报。回答生成和播报期间暂停识别、丢弃麦克风输入，不支持开口自动打断；文字请求和最后一段音频都结束后恢复连续聆听。现有“停止播报”手动中断 SSE/TTS 并恢复识别；新一轮识别连接就绪前的首句缓存必须保留。
 - 待机、聆听/思考与视频 poster 均使用 safety-assistant-robot-idle-v1.png（蓝色机器人）；播报使用 safety-assistant-robot-speaking-v1.webm，保留现有状态动作和波形，播报容器 animation:none、transform:none。

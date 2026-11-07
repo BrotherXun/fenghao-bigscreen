@@ -132,8 +132,8 @@ test("语音模式使用蓝色机器人，并保留思考动作和播报浮动�
   assert.match(screenCss, /\.assistant-signal-copy\s*\{[^}]*text-align:\s*center/);
   assert.match(screenCss, /\.assistant-voice-actions\s*\{[^}]*justify-content:\s*center/);
   assert.doesNotMatch(screenCss, /assistant-signal-surface[^}]*translateX\(-5%\)/);
-  assert.match(screenHtml, /screen\.css\?v=20/);
-  assert.match(screenHtml, /screen\.js\?v=19/);
+  assert.match(screenHtml, /screen\.css\?v=21/);
+  assert.match(screenHtml, /screen\.js\?v=22/);
   assert.match(screenHtml, /screen-voice\.js\?v=7/);
   assert.doesNotMatch(screenHtml, /assistant-voice-orb|assistant-signal-aura|assistant-signal-orbit|assistant-signal-points/);
   assert.doesNotMatch(screenCss, /assistant-orb-breathe|assistant-aura-pulse|assistant-orbit|assistant-point/);

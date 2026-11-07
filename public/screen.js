@@ -15,7 +15,8 @@ const screenApp = createApp({
       deviceId = ""; deviceToken = "";
       try {
         sessionStorage.setItem("fenghao-screen-access", JSON.stringify({ mode: "token", token: accessToken,
-          requestId: savedAccess?.requestId || "", session: savedAccess?.session || null }));
+          requestId: savedAccess?.requestId || "", session: savedAccess?.session || null,
+          ...(savedAccess?.learningMode ? { learningMode: savedAccess.learningMode } : {}) }));
         // 片段不会发送到服务器；保留它以便微信打开后仍可复制到另一台电脑。
       } catch (_) { /* 保留链接；开始前必须能够保存幂等记录。 */ }
     } else try {
@@ -52,6 +53,16 @@ const screenApp = createApp({
       deviceTimer: null,
       commandBusy: false,
       sessionEpoch: 0,
+      learningMode: savedAccess?.learningMode === "personal" ? "personal" : "dispatch",
+      videoDispatch: null,
+      dispatchError: "",
+      dispatchBusy: false,
+      dispatchEpoch: 0,
+      dispatchRequest: null,
+      dispatchCancel: null,
+      dispatchSequence: 0,
+      dispatchTimer: null,
+      dispatchExpiryTimer: null,
       playbackStates: {},
       assistantOpen: true,
       assistantViewMode: "voice",
@@ -98,10 +109,18 @@ const screenApp = createApp({
       adminVideoPlaybackError: "",
       adminVideoFullscreen: false,
       adminVideoFullscreenListener: null,
+      adminDispatchTitle: "",
+      adminDispatchHours: 24,
+      adminDispatchBusy: false,
+      adminDispatchRequest: null,
+      adminDispatchSequence: 0,
+      adminDispatchError: "",
+      adminDispatchNotice: "",
     };
   },
   computed: {
     title() {
+      if (this.stage === "dispatch") return "现场视频扫码学习";
       if (this.stage === "waiting") return "扫码开始个人学习";
       if (this.stage === "identified") return "工人身份已识别";
       if (this.stage === "playing") return "正在播放安全教育视频";
@@ -109,6 +128,7 @@ const screenApp = createApp({
       return "大屏机初始化";
     },
     subtitle() {
+      if (this.stage === "dispatch") return "使用丰浩工人端扫码，在自己的手机完整观看并留下学习记录。";
       if (this.stage === "waiting") return "请使用工人端扫描二维码，开始个人安全教育学习。";
       if (this.stage === "identified") return "请核对学习人员信息后确认签到。";
       if (this.stage === "playing") return "请按课程顺序完成学习，进度将自动同步。";
@@ -116,6 +136,7 @@ const screenApp = createApp({
       return "正在连接学习服务并准备本次会话。";
     },
     sessionStatusLabel() {
+      if (this.stage === "dispatch") return this.videoDispatch ? "现场视频分发中" : "等待视频分发";
       const labels = {
         waiting_scan: "等待扫码",
         worker_identified: "待确认签到",
@@ -243,6 +264,8 @@ const screenApp = createApp({
     FenghaoApi.onAccessRejected = null;
     this.sessionEpoch += 1;
     this.stopPolling();
+    this.stopDispatchPolling();
+    this.adminDispatchRequest = null;
     if (this.deviceTimer) clearInterval(this.deviceTimer);
     this.stopAssistantVoice();
     this.cancelAssistantRequest();
@@ -254,7 +277,7 @@ const screenApp = createApp({
     saveAccessSession() {
       try {
         sessionStorage.setItem("fenghao-screen-access", JSON.stringify({ mode: "token", token: this.accessToken,
-          requestId: this.accessRequestId, session: this.accessSession }));
+          requestId: this.accessRequestId, session: this.accessSession, learningMode: this.learningMode }));
       } catch (_) { throw new Error("浏览器无法保存会话，请允许此站点使用会话存储后再开始。"); }
     },
     canUseScreen() {
@@ -278,6 +301,9 @@ const screenApp = createApp({
         : exhausted ? "此链接的使用次数已用完，请联系管理员获取新链接。" : "此大屏链接或会话已失效，请联系管理员确认授权。";
       this.sessionEpoch += 1;
       this.stopPolling();
+      this.stopDispatchPolling();
+      this.adminDispatchRequest = null;
+      this.adminDispatchBusy = false;
       if (this.deviceTimer) clearInterval(this.deviceTimer);
       this.deviceTimer = null;
       this.$refs.learningVideo?.pause();
@@ -357,6 +383,125 @@ const screenApp = createApp({
     deviceHeaders() {
       return { "X-Screen-Device-ID": this.deviceId, "X-Screen-Device-Token": this.deviceToken };
     },
+    clearDispatchQr() {
+      const node = this.$refs.dispatchQr;
+      if (node) { node.replaceChildren(); node.removeAttribute("title"); }
+    },
+    validDispatchRow(row) {
+      if (!row || row.status !== "ACTIVE" || row.deviceId !== this.deviceId || Date.parse(row.expiresAt) <= Date.now()
+        || !Number.isFinite(Date.parse(row.expiresAt))) return false;
+      const match = String(row.qrCode || "").match(/^screen-video:([^:]{1,128}):([A-Za-z0-9_-]{16,256})$/);
+      return Boolean(match && match[1] === row.dispatchId);
+    },
+    renderDispatchQr() {
+      this.clearDispatchQr();
+      if (!this.validDispatchRow(this.videoDispatch) || !this.$refs.dispatchQr) return;
+      if (typeof window.QRCode !== "function") { this.dispatchError = "二维码组件未加载，请刷新页面重试。"; return; }
+      try {
+        new window.QRCode(this.$refs.dispatchQr, { text: this.videoDispatch.qrCode, width: 240, height: 240,
+          correctLevel: window.QRCode.CorrectLevel.M });
+        this.$refs.dispatchQr.removeAttribute("title");
+      } catch (_) { this.dispatchError = "二维码生成失败，请刷新分发重试。"; this.clearDispatchQr(); }
+    },
+    stopDispatchPolling() {
+      this.dispatchEpoch++;
+      const cancel = this.dispatchCancel;
+      this.dispatchCancel = null;
+      cancel?.();
+      if (this.dispatchTimer) clearInterval(this.dispatchTimer);
+      if (this.dispatchExpiryTimer) clearInterval(this.dispatchExpiryTimer);
+      this.dispatchTimer = null; this.dispatchExpiryTimer = null; this.dispatchRequest = null;
+      this.dispatchBusy = false; this.videoDispatch = null;
+      this.clearDispatchQr();
+    },
+    isDispatchVisible() {
+      return this.stage === "dispatch" && !this.assistantOpen && !this.adminVideoOpen && !this.adminLoginOpen;
+    },
+    resumeDispatchIfVisible() {
+      if (!this.isDispatchVisible() || this.dispatchTimer || this.dispatchRequest
+        || !this.deviceId || !this.deviceToken || !this.canUseScreen()) return;
+      return this.startDispatchPolling();
+    },
+    async startDispatchPolling() {
+      this.stopDispatchPolling();
+      if (!this.isDispatchVisible()) return;
+      this.dispatchTimer = setInterval(this.pollVideoDispatch, 5000);
+      this.dispatchExpiryTimer = setInterval(() => {
+        if (this.videoDispatch && (!this.canUseScreen() || !this.validDispatchRow(this.videoDispatch))) {
+          this.videoDispatch = null; this.clearDispatchQr();
+        }
+      }, 1000);
+      await this.pollVideoDispatch();
+    },
+    async pollVideoDispatch() {
+      if (!this.canUseScreen() || !this.deviceId || !this.deviceToken || !this.isDispatchVisible() || this.dispatchRequest) return;
+      const context = { requestId: ++this.dispatchSequence, epoch: this.dispatchEpoch, deviceId: this.deviceId, token: this.deviceToken };
+      const current = () => context.epoch === this.dispatchEpoch && context.deviceId === this.deviceId
+        && context.token === this.deviceToken && this.isDispatchVisible() && this.canUseScreen();
+      this.dispatchRequest = context.requestId; this.dispatchBusy = true;
+      const controller = new AbortController();
+      let rejectRead;
+      const interrupted = new Promise((_resolve, reject) => { rejectRead = reject; });
+      const timeout = setTimeout(() => {
+        if (this.dispatchRequest !== context.requestId) return;
+        rejectRead(new Error("现场视频读取超时，请点击刷新重试。"));
+        controller.abort();
+      }, 15000);
+      const cancel = () => {
+        clearTimeout(timeout);
+        rejectRead(new Error("已停止读取当前分发。"));
+        controller.abort();
+      };
+      this.dispatchCancel = cancel;
+      try {
+        const row = await Promise.race([
+          FenghaoApi.screenVideoDispatch(context.deviceId, context.token, { signal: controller.signal }), interrupted,
+        ]);
+        if (!current()) return;
+        const previous = this.videoDispatch?.qrCode;
+        this.videoDispatch = this.validDispatchRow(row) ? row : null;
+        this.dispatchError = row && row.status === "ACTIVE" && !this.videoDispatch ? "当前分发已失效，请联系管理员重新发布。" : "";
+        if (previous !== this.videoDispatch?.qrCode) this.$nextTick(() => { if (current()) this.renderDispatchQr(); });
+      } catch (error) {
+        if (!current()) return;
+        this.videoDispatch = null; this.clearDispatchQr();
+        this.dispatchError = error.message || "临时视频暂时无法读取，请重试。";
+      } finally {
+        clearTimeout(timeout);
+        if (this.dispatchRequest === context.requestId) {
+          this.dispatchRequest = null; this.dispatchBusy = false;
+          if (this.dispatchCancel === cancel) this.dispatchCancel = null;
+        }
+      }
+    },
+    async openDispatchLearning() {
+      if (!this.canUseScreen() || !this.deviceId || !this.deviceToken) {
+        this.error = "请先点击开始使用，开启本次设备会话。"; return;
+      }
+      this.closeAdminVideoCenter({ resumeDispatch: false }); this.closeAssistant({ resumeDispatch: false });
+      this.$refs.learningVideo?.pause(); this.sessionEpoch++; this.stopPolling();
+      this.learningMode = "dispatch"; this.stage = "dispatch"; this.error = ""; this.dispatchError = "";
+      if (this.accessMode) { try { this.saveAccessSession(); } catch (_) { /* 本次仍可读取分发。 */ } }
+      await this.startDispatchPolling();
+    },
+    async openPersonalLearning() {
+      if (!this.canUseScreen()) return;
+      this.stopDispatchPolling(); this.closeAssistant({ resumeDispatch: false }); this.closeAdminVideoCenter({ resumeDispatch: false });
+      this.learningMode = "personal";
+      if (this.accessMode) { try { this.saveAccessSession(); } catch (_) { /* 不影响当前学习。 */ } }
+      await this.init();
+    },
+    formatDispatchExpiry(value) {
+      const date = new Date(value);
+      return Number.isFinite(date.getTime()) ? date.toLocaleString("zh-CN", { hour12: false }) : "-";
+    },
+    formatDispatchDuration(value) {
+      const seconds = Math.ceil(Number(value || 0) / 1000);
+      return `${Math.floor(seconds / 60)}分${seconds % 60}秒`;
+    },
+    isAdminVideoDispatchable(video) {
+      return this.isAdminVideoPlayable(video) && video.status === "ACTIVE" && video.processingStatus === "READY" && Number(video.durationMs) > 0;
+    },
     startDevicePolling() {
       if (this.deviceTimer) clearInterval(this.deviceTimer);
       this.deviceTimer = setInterval(this.pollDeviceCommands, 5000);
@@ -379,7 +524,7 @@ const screenApp = createApp({
         if (deviceToken !== this.deviceToken || !this.canUseScreen()) return;
         this.device = device;
         this.applyPlayback();
-        if (!this.busy && this.session.sessionId && Object.prototype.hasOwnProperty.call(this.device, "currentSessionId")
+        if (this.stage !== "dispatch" && !this.busy && this.session.sessionId && Object.prototype.hasOwnProperty.call(this.device, "currentSessionId")
           && this.device.currentSessionId === null) {
           this.$refs.learningVideo?.pause();
           await this.createSession();
@@ -392,7 +537,10 @@ const screenApp = createApp({
             try {
               if (this.busy) throw new Error("当前学习请求尚未结束，请稍后重连。");
               this.sessionEpoch += 1;
-              const sessionId = this.device.currentSessionId || this.session.sessionId;
+              const sessionId = this.stage === "dispatch" ? null : this.device.currentSessionId || this.session.sessionId;
+              if (this.stage === "dispatch") {
+                await this.pollVideoDispatch();
+              } else
               if (sessionId) {
                 const data = await FenghaoApi.screenSession(sessionId, this.deviceToken);
                 if (deviceToken !== this.deviceToken || !this.canUseScreen()) return;
@@ -438,6 +586,11 @@ const screenApp = createApp({
         const device = await FenghaoApi.screenConfig(this.deviceId, deviceToken);
         if (deviceToken !== this.deviceToken || !this.canUseScreen()) return;
         this.device = device;
+        if (this.learningMode !== "personal") {
+          this.stage = "dispatch";
+          if (!this.assistantOpen) await this.startDispatchPolling();
+          return;
+        }
         if (this.device.currentSessionId) {
           this.session = { sessionId: this.device.currentSessionId };
           this.stage = "waiting";
@@ -834,16 +987,17 @@ const screenApp = createApp({
         this.openAdminVideoCenter();
         return;
       }
-      this.closeAssistant();
+      this.closeAssistant({ resumeDispatch: false });
       this.adminLoginError = "";
       this.adminLoginOpen = true;
       this.$nextTick(() => this.$refs.adminLoginUsername?.focus());
     },
-    closeAdminLogin() {
+    closeAdminLogin(options) {
       if (this.adminLoginBusy) return;
       this.adminLoginOpen = false;
       this.adminLoginError = "";
       this.adminLoginForm.password = "";
+      if (options?.resumeDispatch !== false) return this.resumeDispatchIfVisible();
     },
     async submitAdminLogin() {
       if (!this.canUseScreen()) return;
@@ -889,20 +1043,22 @@ const screenApp = createApp({
     },
     openAdminVideoCenter() {
       if (!this.canUseScreen()) return;
+      this.stopDispatchPolling();
       if (!this.adminSession) {
         this.openAdminLogin();
         return;
       }
-      this.closeAssistant();
+      this.closeAssistant({ resumeDispatch: false });
       this.adminVideoOpen = true;
       this.$nextTick(() => this.$refs.adminVideoOverlay?.focus());
       if (!this.adminVideosLoaded) this.loadAdminVideos();
     },
-    closeAdminVideoCenter() {
+    closeAdminVideoCenter(options) {
       this.exitAdminVideoFullscreen();
       this.pauseAdminVideo();
       this.adminVideoOpen = false;
       this.adminVideoPlaybackError = "";
+      if (options?.resumeDispatch !== false) return this.resumeDispatchIfVisible();
     },
     bindAdminVideoFullscreenEvents() {
       if (typeof document === "undefined" || this.adminVideoFullscreenListener) return;
@@ -981,8 +1137,11 @@ const screenApp = createApp({
       }
       this.adminVideoFullscreen = false;
     },
-    logoutProjectAdmin() {
-      this.closeAdminVideoCenter();
+    logoutProjectAdmin(options) {
+      this.adminDispatchRequest = null; this.adminDispatchBusy = false;
+      this.adminDispatchError = ""; this.adminDispatchNotice = "";
+      this.adminDispatchTitle = ""; this.adminDispatchHours = 24;
+      this.closeAdminVideoCenter({ resumeDispatch: false });
       this.adminSession = null;
       this.adminVideos = [];
       this.adminVideosLoaded = false;
@@ -990,9 +1149,10 @@ const screenApp = createApp({
       this.adminVideoSearch = "";
       this.adminSelectedVideoId = "";
       this.adminLoginForm.password = "";
+      if (options?.resumeDispatch !== false) return this.resumeDispatchIfVisible();
     },
     expireProjectAdminSession() {
-      this.logoutProjectAdmin();
+      this.logoutProjectAdmin({ resumeDispatch: false });
       this.adminLoginError = "登录已失效，请重新登录后查看视频。";
       this.adminLoginOpen = true;
       this.$nextTick(() => this.$refs.adminLoginUsername?.focus());
@@ -1028,6 +1188,36 @@ const screenApp = createApp({
       this.pauseAdminVideo();
       this.adminSelectedVideoId = video.resourceId;
       this.adminVideoPlaybackError = "";
+      this.adminDispatchTitle = video.title || "";
+      this.adminDispatchError = ""; this.adminDispatchNotice = "";
+    },
+    async publishAdminVideoDispatch() {
+      if (this.adminDispatchBusy) return;
+      this.adminDispatchError = ""; this.adminDispatchNotice = "";
+      if (!this.canUseScreen() || !this.deviceId || !this.deviceToken) {
+        this.adminDispatchError = "请先点击开始使用，开启本次设备会话后再下发视频。"; return;
+      }
+      const video = this.adminSelectedVideo;
+      if (!this.adminSession?.token || !this.isAdminVideoDispatchable(video)) {
+        this.adminDispatchError = "请由项目管理员登录并选择已处理完成的可用视频。"; return;
+      }
+      const title = (this.adminDispatchTitle || video.title || "").trim();
+      const hours = Number(this.adminDispatchHours);
+      if (!title || !Number.isInteger(hours) || hours < 1 || hours > 168) {
+        this.adminDispatchError = "请填写标题，有效时间须为1至168小时的整数。"; return;
+      }
+      const request = { requestId: ++this.adminDispatchSequence, token: this.adminSession.token, deviceId: this.deviceId, deviceToken: this.deviceToken };
+      const current = () => this.adminDispatchRequest === request.requestId && this.adminSession?.token === request.token
+        && this.deviceId === request.deviceId && this.deviceToken === request.deviceToken && this.canUseScreen();
+      this.adminDispatchRequest = request.requestId; this.adminDispatchBusy = true;
+      try {
+        const row = await this.requestScreenAdminApi("/api/v1/admin/screen-video-dispatches", { method: "POST",
+          body: JSON.stringify({ deviceId: request.deviceId, resourceId: video.resourceId, title, validHours: hours }) });
+        if (!current()) return;
+        if (!row?.dispatchId || row.status !== "ACTIVE") throw new Error("未收到发布确认，请刷新后核实。");
+        this.adminDispatchNotice = "已发布临时视频。可返回扫码学习查看当前分发码。";
+      } catch (error) { if (current()) this.adminDispatchError = error.message || "分发失败，请保留输入重试。"; }
+      finally { if (this.adminDispatchRequest === request.requestId) { this.adminDispatchRequest = null; this.adminDispatchBusy = false; } }
     },
     adminVideoIndex(video) {
       const index = this.filteredAdminVideos.findIndex((item) => item.resourceId === video?.resourceId);
@@ -1102,8 +1292,9 @@ const screenApp = createApp({
       if (player && typeof player.pause === "function") player.pause();
     },
     async openAssistant() {
-      this.closeAdminVideoCenter();
-      if (this.adminLoginOpen) this.closeAdminLogin();
+      this.stopDispatchPolling();
+      this.closeAdminVideoCenter({ resumeDispatch: false });
+      if (this.adminLoginOpen) this.closeAdminLogin({ resumeDispatch: false });
       this.assistantOpen = true;
       this.assistantViewMode = "voice";
       if (!this.assistantMessages.length) this.resetAssistant();
@@ -1116,10 +1307,11 @@ const screenApp = createApp({
         this.$nextTick(() => this.$refs.assistantInput?.focus());
       }
     },
-    closeAssistant() {
+    closeAssistant(options) {
       this.assistantOpen = false;
       this.cancelAssistantRequest();
       this.stopAssistantVoice();
+      if (options?.resumeDispatch !== false) return this.resumeDispatchIfVisible();
     },
     cancelAssistantRequest() {
       this.assistantRequestId += 1;
